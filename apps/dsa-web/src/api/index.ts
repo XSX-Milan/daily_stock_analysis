@@ -27,3 +27,5 @@ apiClient.interceptors.response.use(
 );
 
 export default apiClient;
+
+export { recommendationApi } from './recommendation';

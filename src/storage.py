@@ -57,6 +57,10 @@ Base = declarative_base()
 if TYPE_CHECKING:
     from src.search_service import SearchResponse
 
+from src.recommendation import db_models as recommendation_db_models
+
+_ = recommendation_db_models
+
 
 # === 数据模型定义 ===
 

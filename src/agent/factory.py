@@ -1,30 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-Shared factory for building fully-configured AgentExecutor instances.
-
-Centralises construction to eliminate boilerplate duplicated across
-api/v1/endpoints/agent.py, bot/commands/chat.py, bot/commands/ask.py,
-and src/core/pipeline.py.
-
-Performance notes
------------------
-* ``ToolRegistry`` is built once and cached at module level — tool
-  registrations are immutable after setup so the object is safe to share
-  across every request.
-* ``SkillManager`` is expensive to create (loads YAML files from disk).
-  A prototype is built on first use and cheap ``deepcopy`` clones are
-  returned for each request, preserving thread-safety (``activate()``
-  mutates internal state).
-
-Usage::
-
-    from src.agent.factory import build_agent_executor
-
-    executor = build_agent_executor(config, skills=["bull_trend", "shrink_pullback"])
-    result   = executor.chat(message="...", session_id="...")
-"""
+"""Shared factory for building configured agent executors/orchestrators."""
 
 import copy
+import importlib
 import logging
 from typing import List, Optional
 
@@ -51,7 +29,7 @@ DEFAULT_AGENT_SKILLS = [
 
 
 def get_tool_registry():
-    """Return a cached ToolRegistry (built once, shared across requests)."""
+    """Return a cached ToolRegistry built once per process."""
     global _TOOL_REGISTRY
     if _TOOL_REGISTRY is not None:
         return _TOOL_REGISTRY
@@ -62,12 +40,29 @@ def get_tool_registry():
     from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
     from src.agent.tools.market_tools import ALL_MARKET_TOOLS
 
+    optional_tool_groups = []
+    try:
+        backtest_module = importlib.import_module("src.agent.tools.backtest_tools")
+        optional_tool_groups.append(getattr(backtest_module, "ALL_BACKTEST_TOOLS", []))
+    except Exception:
+        logger.debug("[AgentFactory] backtest tools not available; skip registration")
+
     registry = ToolRegistry()
-    for tool_fn in ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS:
-        registry.register(tool_fn)
+    tool_groups = [
+        ALL_DATA_TOOLS,
+        ALL_ANALYSIS_TOOLS,
+        ALL_SEARCH_TOOLS,
+        ALL_MARKET_TOOLS,
+    ] + optional_tool_groups
+    for group in tool_groups:
+        for tool_fn in group:
+            registry.register(tool_fn)
 
     _TOOL_REGISTRY = registry
-    logger.info("[AgentFactory] ToolRegistry cached (%d tools)", len(registry._tools) if hasattr(registry, "_tools") else -1)
+    logger.info(
+        "[AgentFactory] ToolRegistry cached (%d tools)",
+        len(registry._tools) if hasattr(registry, "_tools") else -1,
+    )
     return _TOOL_REGISTRY
 
 
@@ -86,17 +81,24 @@ def get_skill_manager(config=None):
 
     if config is None:
         from src.config import get_config
+
         config = get_config()
 
     current_custom_dir = getattr(config, "agent_strategy_dir", None)
-    if _SKILL_MANAGER_PROTOTYPE is not None and current_custom_dir == _SKILL_MANAGER_CUSTOM_DIR:
+    if (
+        _SKILL_MANAGER_PROTOTYPE is not None
+        and current_custom_dir == _SKILL_MANAGER_CUSTOM_DIR
+    ):
         return copy.deepcopy(_SKILL_MANAGER_PROTOTYPE)
 
     from src.agent.skills.base import SkillManager
 
     if _SKILL_MANAGER_PROTOTYPE is not None:
-        logger.info("[AgentFactory] SkillManager prototype invalidated (agent_strategy_dir changed: %r → %r)",
-                    _SKILL_MANAGER_CUSTOM_DIR, current_custom_dir)
+        logger.info(
+            "[AgentFactory] SkillManager prototype invalidated (agent_strategy_dir changed: %r → %r)",
+            _SKILL_MANAGER_CUSTOM_DIR,
+            current_custom_dir,
+        )
 
     skill_manager = SkillManager()
     skill_manager.load_builtin_strategies()
@@ -105,16 +107,23 @@ def get_skill_manager(config=None):
         try:
             skill_manager.load_custom_strategies(current_custom_dir)
         except Exception as exc:
-            logger.warning("[AgentFactory] Failed to load custom strategies from %s: %s", current_custom_dir, exc)
+            logger.warning(
+                "[AgentFactory] Failed to load custom strategies from %s: %s",
+                current_custom_dir,
+                exc,
+            )
 
     _SKILL_MANAGER_PROTOTYPE = skill_manager
     _SKILL_MANAGER_CUSTOM_DIR = current_custom_dir
-    logger.info("[AgentFactory] SkillManager prototype cached (%d strategies)", len(skill_manager._skills))
+    logger.info(
+        "[AgentFactory] SkillManager prototype cached (%d strategies)",
+        len(skill_manager._skills),
+    )
     return copy.deepcopy(_SKILL_MANAGER_PROTOTYPE)
 
 
 def build_agent_executor(config=None, skills: Optional[List[str]] = None):
-    """Build and return a configured AgentExecutor.
+    """Build and return a configured AgentExecutor or AgentOrchestrator.
 
     Args:
         config: Application config object.  When *None*, ``get_config()`` is
@@ -124,23 +133,47 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
                 ``DEFAULT_AGENT_SKILLS``.
 
     Returns:
-        A ready-to-call :class:`src.agent.executor.AgentExecutor` instance.
+        A ready-to-call executor/orchestrator instance exposing ``run`` and ``chat``.
     """
     if config is None:
         from src.config import get_config
+
         config = get_config()
 
-    from src.agent.executor import AgentExecutor
     from src.agent.llm_adapter import LLMToolAdapter
 
     registry = get_tool_registry()
     skill_manager = get_skill_manager(config)
 
-    skills_to_activate = skills if skills is not None else (getattr(config, "agent_skills", None) or DEFAULT_AGENT_SKILLS)
+    skills_to_activate = (
+        skills
+        if skills is not None
+        else (getattr(config, "agent_skills", None) or DEFAULT_AGENT_SKILLS)
+    )
     skill_manager.activate(skills_to_activate if skills_to_activate else ["all"])
-    logger.info("[AgentFactory] Activated strategies: %s", skills_to_activate)
+    arch = getattr(config, "agent_arch", "single")
+    logger.info(
+        "[AgentFactory] Activated strategies: %s (arch=%s)", skills_to_activate, arch
+    )
 
     llm_adapter = LLMToolAdapter(config)
+    if arch == "multi":
+        from src.agent.orchestrator import AgentOrchestrator
+
+        mode = getattr(config, "agent_orchestrator_mode", "standard")
+        logger.info("[AgentFactory] Building AgentOrchestrator (mode=%s)", mode)
+        return AgentOrchestrator(
+            tool_registry=registry,
+            llm_adapter=llm_adapter,
+            skill_instructions=skill_manager.get_skill_instructions(),
+            max_steps=getattr(config, "agent_max_steps", 10),
+            mode=mode,
+            skill_manager=skill_manager,
+            config=config,
+        )
+
+    from src.agent.executor import AgentExecutor
+
     return AgentExecutor(
         tool_registry=registry,
         llm_adapter=llm_adapter,

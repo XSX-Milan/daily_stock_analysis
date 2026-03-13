@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 # Data classes
 # ============================================================
 
+
 @dataclass
 class ToolParameter:
     """Schema for a single tool parameter."""
+
     name: str
     type: str  # "string" | "number" | "integer" | "boolean" | "array" | "object"
     description: str
@@ -35,6 +37,7 @@ class ToolParameter:
 @dataclass
 class ToolDefinition:
     """Complete definition of an agent-callable tool."""
+
     name: str
     description: str
     parameters: List[ToolParameter]
@@ -77,6 +80,7 @@ class ToolDefinition:
 # ============================================================
 # Tool Registry
 # ============================================================
+
 
 class ToolRegistry:
     """Central registry for all agent-callable tools.
@@ -149,7 +153,9 @@ class ToolRegistry:
             # Gemini may return namespaced names like default_api:get_realtime_quote
             tool_def = self._tools.get(name.split(":", 1)[-1])
         if tool_def is None:
-            raise KeyError(f"Tool '{name}' not found in registry. Available: {self.list_names()}")
+            raise KeyError(
+                f"Tool '{name}' not found in registry. Available: {self.list_names()}"
+            )
 
         return tool_def.handler(**kwargs)
 
@@ -188,6 +194,7 @@ def tool(
         def get_realtime_quote(stock_code: str) -> dict:
             ...
     """
+
     def decorator(func: Callable) -> Callable:
         # Infer parameters from type hints if not provided
         params = parameters
@@ -206,7 +213,7 @@ def tool(
         target_registry.register(tool_def)
 
         # Attach metadata to function for introspection
-        func._tool_definition = tool_def
+        setattr(func, "_tool_definition", tool_def)
         return func
 
     return decorator
@@ -215,7 +222,7 @@ def tool(
 def _infer_parameters(func: Callable) -> List[ToolParameter]:
     """Infer ToolParameter list from function signature and type hints."""
     sig = inspect.signature(func)
-    hints = getattr(func, '__annotations__', {})
+    hints = getattr(func, "__annotations__", {})
     params: List[ToolParameter] = []
 
     type_map = {
@@ -233,11 +240,13 @@ def _infer_parameters(func: Callable) -> List[ToolParameter]:
         # Skip return annotation
         hint = hints.get(param_name, str)
         # Handle Optional and other typing constructs
-        origin = getattr(hint, '__origin__', None)
+        origin = getattr(hint, "__origin__", None)
         if origin is not None:
             # Optional[X] -> X, List[X] -> array, etc.
-            args = getattr(hint, '__args__', ())
-            if origin is list or (hasattr(origin, '__name__') and origin.__name__ == 'List'):
+            args = getattr(hint, "__args__", ())
+            if origin is list or (
+                hasattr(origin, "__name__") and origin.__name__ == "List"
+            ):
                 param_type = "array"
             elif origin is dict:
                 param_type = "object"

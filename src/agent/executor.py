@@ -8,6 +8,10 @@ Orchestrates the LLM + tools interaction loop:
 3. If tool_call → execute tool → feed result back
 4. If text → parse as final answer
 5. Loop until final answer or max_steps
+
+The core execution loop is delegated to :mod:`src.agent.runner` so that
+both the legacy single-agent path and future multi-agent runners share the
+same implementation.
 """
 
 import json

@@ -25,6 +25,7 @@ import os
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
@@ -38,6 +39,17 @@ from tenacity import (
     retry_if_exception_type,
     before_sleep_log,
 )
+
+# Timeout (seconds) for efinance library calls that go through eastmoney APIs
+# with no built-in timeout.  Prevents indefinite hangs when hosts are unreachable.
+try:
+    _EF_CALL_TIMEOUT = int(os.environ.get("EFINANCE_CALL_TIMEOUT", "30"))
+except (ValueError, TypeError):
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "EFINANCE_CALL_TIMEOUT is not a valid integer, using default 30s"
+    )
+    _EF_CALL_TIMEOUT = 30
 
 from patch.eastmoney_patch import eastmoney_patch
 from src.config import get_config
@@ -151,6 +163,29 @@ def _is_us_code(stock_code: str) -> bool:
     """
     code = stock_code.strip().upper()
     return bool(re.match(r'^[A-Z]{1,5}(\.[A-Z])?$', code))
+
+
+def _ef_call_with_timeout(func, *args, timeout=None, **kwargs):
+    """Run an efinance library call in a thread with a timeout.
+
+    efinance internally uses requests/urllib3 with no timeout, so when
+    eastmoney hosts are unreachable the call can hang for many minutes.
+    This helper caps the *calling thread's* wait time.  Note: Python threads
+    cannot be forcibly killed, so the worker thread may continue running in
+    the background until the OS-level TCP timeout fires or the process exits.
+    This is acceptable — the calling thread returns promptly on timeout.
+    """
+    if timeout is None:
+        timeout = _EF_CALL_TIMEOUT
+    # Do NOT use 'with ThreadPoolExecutor(...)' here: the context manager calls
+    # shutdown(wait=True) on __exit__, which would re-block on the hung thread.
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(func, *args, **kwargs)
+        return future.result(timeout=timeout)
+    finally:
+        # wait=False: calling thread returns immediately; worker cleans up later
+        executor.shutdown(wait=False)
 
 
 def _classify_eastmoney_error(exc: Exception) -> Tuple[str, str]:
@@ -359,12 +394,14 @@ class EfinanceFetcher(BaseFetcher):
             # 调用 efinance 获取 A 股日线数据
             # klt=101 获取日线数据
             # fqt=1 获取前复权数据
-            df = ef.stock.get_quote_history(
+            df = _ef_call_with_timeout(
+                ef.stock.get_quote_history,
                 stock_codes=stock_code,
                 beg=beg_date,
                 end=end_date_fmt,
                 klt=101,  # 日线
-                fqt=1     # 前复权
+                fqt=1,    # 前复权
+                timeout=60,
             )
             
             api_elapsed = time.time() - api_start
@@ -445,12 +482,14 @@ class EfinanceFetcher(BaseFetcher):
         api_start = time.time()
         try:
             # ETFs are exchange-traded securities; use the stock API to get full OHLCV data
-            df = ef.stock.get_quote_history(
+            df = _ef_call_with_timeout(
+                ef.stock.get_quote_history,
                 stock_codes=stock_code,
                 beg=beg_date,
                 end=end_date_fmt,
                 klt=101,  # daily
-                fqt=1     # forward-adjusted
+                fqt=1,    # forward-adjusted
+                timeout=60,
             )
 
             api_elapsed = time.time() - api_start
@@ -590,8 +629,8 @@ class EfinanceFetcher(BaseFetcher):
                 import time as _time
                 api_start = _time.time()
                 
-                # efinance 的实时行情 API
-                df = ef.stock.get_realtime_quotes()
+                # efinance 的实时行情 API (with timeout to avoid indefinite hangs)
+                df = _ef_call_with_timeout(ef.stock.get_realtime_quotes)
                 
                 api_elapsed = _time.time() - api_start
                 logger.info(f"[API返回] ef.stock.get_realtime_quotes 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
@@ -655,6 +694,10 @@ class EfinanceFetcher(BaseFetcher):
                        f"量比={quote.volume_ratio}, 换手率={quote.turnover_rate}%")
             return quote
             
+        except FuturesTimeoutError:
+            logger.warning(f"[超时] ef.stock.get_realtime_quotes() 超过 {_EF_CALL_TIMEOUT}s，跳过 {stock_code}")
+            circuit_breaker.record_failure(source_key, "timeout")
+            return None
         except Exception as e:
             logger.error(f"[API错误] 获取 {stock_code} 实时行情(efinance)失败: {e}")
             circuit_breaker.record_failure(source_key, str(e))
@@ -690,7 +733,7 @@ class EfinanceFetcher(BaseFetcher):
                 logger.info("[API调用] ef.stock.get_realtime_quotes(['ETF']) 获取ETF实时行情...")
                 import time as _time
                 api_start = _time.time()
-                df = ef.stock.get_realtime_quotes(['ETF'])
+                df = _ef_call_with_timeout(ef.stock.get_realtime_quotes, ['ETF'])
                 api_elapsed = _time.time() - api_start
 
                 if df is not None and not df.empty:
@@ -778,7 +821,7 @@ class EfinanceFetcher(BaseFetcher):
             logger.info("[API调用] ef.stock.get_realtime_quotes(['沪深系列指数']) 获取指数行情...")
             import time as _time
             api_start = _time.time()
-            df = ef.stock.get_realtime_quotes(['沪深系列指数'])
+            df = _ef_call_with_timeout(ef.stock.get_realtime_quotes, ['沪深系列指数'])
             api_elapsed = _time.time() - api_start
 
             if df is None or df.empty:
@@ -849,7 +892,7 @@ class EfinanceFetcher(BaseFetcher):
                 df = _realtime_cache['data']
             else:
                 logger.info("[API调用] ef.stock.get_realtime_quotes() 获取市场统计...")
-                df = ef.stock.get_realtime_quotes()
+                df = _ef_call_with_timeout(ef.stock.get_realtime_quotes)
                 _realtime_cache['data'] = df
                 _realtime_cache['timestamp'] = current_time
 
@@ -962,7 +1005,7 @@ class EfinanceFetcher(BaseFetcher):
             self._enforce_rate_limit()
 
             logger.info("[API调用] ef.stock.get_realtime_quotes(['行业板块']) 获取板块行情...")
-            df = ef.stock.get_realtime_quotes(['行业板块'])
+            df = _ef_call_with_timeout(ef.stock.get_realtime_quotes, ['行业板块'])
             if df is None or df.empty:
                 logger.warning("[efinance] 板块行情数据为空")
                 return None
@@ -1014,7 +1057,7 @@ class EfinanceFetcher(BaseFetcher):
             import time as _time
             api_start = _time.time()
             
-            info = ef.stock.get_base_info(stock_code)
+            info = _ef_call_with_timeout(ef.stock.get_base_info, stock_code)
             
             api_elapsed = _time.time() - api_start
             logger.info(f"[API返回] ef.stock.get_base_info 成功, 耗时 {api_elapsed:.2f}s")
@@ -1059,7 +1102,7 @@ class EfinanceFetcher(BaseFetcher):
             import time as _time
             api_start = _time.time()
             
-            df = ef.stock.get_belong_board(stock_code)
+            df = _ef_call_with_timeout(ef.stock.get_belong_board, stock_code)
             
             api_elapsed = _time.time() - api_start
             
@@ -1069,7 +1112,10 @@ class EfinanceFetcher(BaseFetcher):
             else:
                 logger.warning(f"[API返回] 未获取到 {stock_code} 的板块信息")
                 return None
-                
+            
+        except FuturesTimeoutError:
+            logger.warning(f"[超时] ef.stock.get_belong_board({stock_code}) 超过 {_EF_CALL_TIMEOUT}s，跳过")
+            return None
         except Exception as e:
             logger.error(f"[API错误] 获取 {stock_code} 所属板块失败: {e}")
             return None

@@ -38,20 +38,26 @@ def check_content_integrity(result: "AnalysisResult") -> Tuple[bool, List[str]]:
     missing: List[str] = []
     if result.sentiment_score is None:
         missing.append("sentiment_score")
-    if not (result.operation_advice or "").strip():
+    advice = result.operation_advice
+    if not advice or not isinstance(advice, str) or not advice.strip():
         missing.append("operation_advice")
-    if not (result.analysis_summary or "").strip():
+    summary = result.analysis_summary
+    if not summary or not isinstance(summary, str) or not summary.strip():
         missing.append("analysis_summary")
-    dash = result.dashboard or {}
-    core = dash.get("core_conclusion") or {}
+    dash = result.dashboard if isinstance(result.dashboard, dict) else {}
+    core = dash.get("core_conclusion")
+    core = core if isinstance(core, dict) else {}
     if not (core.get("one_sentence") or "").strip():
         missing.append("dashboard.core_conclusion.one_sentence")
     intel = dash.get("intelligence")
+    intel = intel if isinstance(intel, dict) else None
     if intel is None or "risk_alerts" not in intel:
         missing.append("dashboard.intelligence.risk_alerts")
     if result.decision_type in ("buy", "hold"):
-        battle = dash.get("battle_plan") or {}
-        sp = battle.get("sniper_points") or {}
+        battle = dash.get("battle_plan")
+        battle = battle if isinstance(battle, dict) else {}
+        sp = battle.get("sniper_points")
+        sp = sp if isinstance(sp, dict) else {}
         stop_loss = sp.get("stop_loss")
         if stop_loss is None or (isinstance(stop_loss, str) and not stop_loss.strip()):
             missing.append("dashboard.battle_plan.sniper_points.stop_loss")

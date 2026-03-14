@@ -690,7 +690,20 @@ class StockAnalysisPipeline:
                 result.name = ai_stock_name
             result.sentiment_score = self._safe_int(dash.get("sentiment_score"), 50)
             result.trend_prediction = dash.get("trend_prediction", "未知")
-            result.operation_advice = dash.get("operation_advice", "观望")
+            raw_advice = dash.get("operation_advice", "观望")
+            if isinstance(raw_advice, dict):
+                # LLM may return {"no_position": "...", "has_position": "..."}
+                # Derive a short string from decision_type for the scalar field
+                _signal_to_advice = {
+                    "buy": "买入", "sell": "卖出", "hold": "持有",
+                    "strong_buy": "强烈买入", "strong_sell": "强烈卖出",
+                }
+                # Normalize decision_type (strip/lower) before lookup so
+                # variants like "BUY" or " Buy " map correctly.
+                raw_dt = str(dash.get("decision_type") or "hold").strip().lower()
+                result.operation_advice = _signal_to_advice.get(raw_dt, "观望")
+            else:
+                result.operation_advice = str(raw_advice) if raw_advice else "观望"
             from src.agent.protocols import normalize_decision_signal
 
             result.decision_type = normalize_decision_signal(
@@ -1146,6 +1159,10 @@ class StockAnalysisPipeline:
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
         
+        # 保存报告到本地文件（无论是否推送通知都保存）
+        if results and not dry_run:
+            self._save_local_report(results, report_type)
+
         # 发送通知（单股推送模式下跳过汇总推送，避免重复）
         if results and send_notification and not dry_run:
             if single_stock_notify:
@@ -1161,6 +1178,19 @@ class StockAnalysisPipeline:
         
         return results
     
+    def _save_local_report(
+        self,
+        results: List[AnalysisResult],
+        report_type: ReportType = ReportType.SIMPLE,
+    ) -> None:
+        """保存分析报告到本地文件（与通知推送解耦）"""
+        try:
+            report = self._generate_aggregate_report(results, report_type)
+            filepath = self.notifier.save_report_to_file(report)
+            logger.info(f"决策仪表盘日报已保存: {filepath}")
+        except Exception as e:
+            logger.error(f"保存本地报告失败: {e}")
+
     def _send_notifications(
         self,
         results: List[AnalysisResult],
@@ -1180,11 +1210,7 @@ class StockAnalysisPipeline:
             logger.info("生成决策仪表盘日报...")
             report = self._generate_aggregate_report(results, report_type)
             
-            # 保存到本地
-            filepath = self.notifier.save_report_to_file(report)
-            logger.info(f"决策仪表盘日报已保存: {filepath}")
-            
-            # 跳过推送（单股推送模式）
+            # 跳过推送（单股推送模式 / 合并模式：报告已由 _save_local_report 保存）
             if skip_push:
                 return
             

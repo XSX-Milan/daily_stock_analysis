@@ -287,7 +287,7 @@ def run_agent_loop(
         # --- LLM call ---
         response = llm_adapter.call_with_tools(messages, tool_decls)
         provider_used = response.provider
-        total_tokens += response.usage.get("total_tokens", 0)
+        total_tokens += (response.usage or {}).get("total_tokens", 0)
         m = getattr(response, "model", "") or response.provider
         if m and m != "error":
             models_used.append(m)

@@ -72,6 +72,7 @@ verify_*.py
 # ignore claude files
 .claude/
 CLAUDE.md
+.sisyphus/
 
 # ignore static files
 static/

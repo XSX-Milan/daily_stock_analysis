@@ -196,11 +196,7 @@ def build_recommendation_agent(
     dimension: Optional[str] = None,
     skills: Optional[List[str]] = None,
 ):
-    """Build and return a recommendation agent instance.
-
-    Prefers unified ``RecommendationAgent`` when available and falls back to
-    legacy recommendation agent classes for compatibility during migration.
-    """
+    """Build and return a recommendation agent instance."""
     if config is None:
         config = _get_runtime_config()
 
@@ -223,34 +219,24 @@ def build_recommendation_agent(
         "skill_instructions": skill_manager.get_skill_instructions(),
     }
 
-    recommendation_cls = None
     try:
         recommendation_module = importlib.import_module(
             "src.agent.agents.recommendation_agent"
         )
         recommendation_cls = getattr(recommendation_module, "RecommendationAgent")
-    except Exception:
-        if dimension:
-            legacy_map = {
-                "technical": "RecommendationTechnicalAgent",
-                "fundamental": "RecommendationFundamentalAgent",
-                "sentiment": "RecommendationSentimentAgent",
-                "macro": "RecommendationMacroAgent",
-                "risk": "RecommendationRiskAgent",
-            }
-            legacy_name = legacy_map.get(str(dimension).lower())
-            if legacy_name:
-                legacy_module = importlib.import_module("src.agent.agents")
-                recommendation_cls = getattr(legacy_module, legacy_name, None)
-
-    if recommendation_cls is None:
-        raise ImportError("Recommendation agent implementation is not available")
+    except Exception as exc:
+        raise ImportError(
+            "Unified RecommendationAgent implementation is not available"
+        ) from exc
 
     if dimension is not None:
         try:
             return recommendation_cls(dimension=dimension, **common_kwargs)
-        except TypeError:
-            pass
+        except TypeError as exc:
+            logger.warning(
+                "RecommendationAgent dimension argument is not supported, fallback without dimension: %s",
+                exc,
+            )
 
     return recommendation_cls(**common_kwargs)
 

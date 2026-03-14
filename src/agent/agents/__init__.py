@@ -12,13 +12,7 @@ from src.agent.agents.intel_agent import IntelAgent
 from src.agent.agents.decision_agent import DecisionAgent
 from src.agent.agents.risk_agent import RiskAgent
 from src.agent.agents.portfolio_agent import PortfolioAgent
-from src.agent.agents.recommendation_fundamental_agent import (
-    RecommendationFundamentalAgent,
-)
-from src.agent.agents.recommendation_macro_agent import RecommendationMacroAgent
-from src.agent.agents.recommendation_risk_agent import RecommendationRiskAgent
-from src.agent.agents.recommendation_sentiment_agent import RecommendationSentimentAgent
-from src.agent.agents.recommendation_technical_agent import RecommendationTechnicalAgent
+from src.agent.agents.recommendation_agent import RecommendationAgent
 
 __all__ = [
     "BaseAgent",
@@ -27,9 +21,5 @@ __all__ = [
     "DecisionAgent",
     "RiskAgent",
     "PortfolioAgent",
-    "RecommendationFundamentalAgent",
-    "RecommendationMacroAgent",
-    "RecommendationRiskAgent",
-    "RecommendationSentimentAgent",
-    "RecommendationTechnicalAgent",
+    "RecommendationAgent",
 ]

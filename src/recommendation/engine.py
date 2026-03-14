@@ -8,14 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from data_provider.realtime_types import UnifiedRealtimeQuote
-from src.agent.agents import (
-    RecommendationFundamentalAgent,
-    RecommendationMacroAgent,
-    RecommendationRiskAgent,
-    RecommendationSentimentAgent,
-    RecommendationTechnicalAgent,
-)
 from src.agent.agents.base_agent import BaseAgent
+from src.agent.agents.recommendation_agent import RecommendationAgent
 from src.agent.factory import get_tool_registry
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.protocols import (
@@ -154,11 +148,19 @@ class ScoringEngine:
 
         registry = get_tool_registry()
         return {
-            "technical": RecommendationTechnicalAgent(registry, self._llm_adapter),
-            "fundamental": RecommendationFundamentalAgent(registry, self._llm_adapter),
-            "sentiment": RecommendationSentimentAgent(registry, self._llm_adapter),
-            "macro": RecommendationMacroAgent(registry, self._llm_adapter),
-            "risk": RecommendationRiskAgent(registry, self._llm_adapter),
+            "technical": RecommendationAgent(
+                registry, self._llm_adapter, dimension="technical"
+            ),
+            "fundamental": RecommendationAgent(
+                registry, self._llm_adapter, dimension="fundamental"
+            ),
+            "sentiment": RecommendationAgent(
+                registry, self._llm_adapter, dimension="sentiment"
+            ),
+            "macro": RecommendationAgent(
+                registry, self._llm_adapter, dimension="macro"
+            ),
+            "risk": RecommendationAgent(registry, self._llm_adapter, dimension="risk"),
         }
 
     def _score_dimension(

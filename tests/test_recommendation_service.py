@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from src.recommendation.models import (
     CompositeScore,
@@ -14,6 +14,40 @@ from src.recommendation.models import (
     ScoringWeights,
 )
 from src.storage import DatabaseManager
+
+
+def build_fast_service(config: SimpleNamespace):
+    db_manager = MagicMock()
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    db_manager.session_scope.return_value.__enter__.return_value = session
+    db_manager.session_scope.return_value.__exit__.return_value = None
+
+    with (
+        patch("src.services.recommendation_service.DataFetcherManager"),
+        patch("src.services.recommendation_service.StockTrendAnalyzer"),
+        patch("src.services.recommendation_service.GeminiAnalyzer"),
+        patch("src.services.recommendation_service.RecommendationRepository"),
+        patch("src.services.recommendation_service.WatchlistService"),
+        patch("src.services.recommendation_service.SectorScannerService"),
+        patch("src.services.recommendation_service.ScoringEngine"),
+        patch(
+            "src.services.recommendation_service.DatabaseManager.get_instance",
+            return_value=db_manager,
+        ),
+    ):
+        from src.services.recommendation_service import RecommendationService
+
+        service = RecommendationService(config=config)
+
+    service.recommendation_repo.get_latest = Mock(return_value=None)
+    service.recommendation_repo.save_batch = Mock()
+    service.recommendation_repo.get_list = Mock(return_value=[])
+    service.recommendation_repo.get_count = Mock(return_value=0)
+    service.recommendation_repo.get_priority_counts = Mock(return_value={})
+    service.sector_cache_service.get_or_fetch_sector = Mock(return_value=None)
+    service.sector_cache_service.save_sector_info = Mock()
+    return service
 
 
 class RecommendationServiceTestCase(unittest.TestCase):
@@ -73,9 +107,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
             "src.services.recommendation_service.RecommendationService.refresh_stocks"
         ) as refresh_stocks:
             refresh_stocks.return_value = ["ok"]
-            from src.services.recommendation_service import RecommendationService
-
-            service = RecommendationService(config=config)
+            service = build_fast_service(config)
             service.sector_scanner_service.get_sector_stocks = Mock(
                 return_value=["000001", "000002", "000003", "000004"]
             )
@@ -111,9 +143,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
     def test_refresh_all_requires_market_and_sector(self) -> None:
         config = SimpleNamespace(max_workers=2)
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=config)
+        service = build_fast_service(config)
 
         with self.assertRaises(ValueError):
             service.refresh_all(market=None, sector="AI")
@@ -123,9 +153,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
     def test_refresh_stocks_reuses_recent_records_when_not_forced(self) -> None:
         config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=config)
+        service = build_fast_service(config)
 
         cached = Mock()
         cached.code = "600519"
@@ -169,9 +197,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
     def test_refresh_stocks_force_bypasses_recent_cache(self) -> None:
         config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=config)
+        service = build_fast_service(config)
         service._split_recent_cached_codes = Mock(return_value=({}, []))
         service._build_stock_payload = Mock(
             return_value={
@@ -204,9 +230,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
     def test_refresh_stocks_filters_codes_by_market_and_sector_scope(self) -> None:
         config = SimpleNamespace(max_workers=2)
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=config)
+        service = build_fast_service(config)
         service.recommendation_repo.get_latest = Mock(
             side_effect=[
                 SimpleNamespace(sector="Technology"),
@@ -248,9 +272,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
     def test_refresh_stocks_requires_scope_pair_when_partially_provided(self) -> None:
         config = SimpleNamespace(max_workers=2)
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=config)
+        service = build_fast_service(config)
 
         with self.assertRaises(ValueError):
             service.refresh_stocks(["AAPL"], market="US", sector=None)
@@ -263,9 +285,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
         with patch(
             "src.services.recommendation_service.RecommendationService._build_stock_payload"
         ) as build_payload:
-            from src.services.recommendation_service import RecommendationService
-
-            service = RecommendationService(config=config)
+            service = build_fast_service(config)
 
             payload_a = {
                 "code": "600519",
@@ -316,9 +336,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
         with patch(
             "src.services.recommendation_service.RecommendationService._build_stock_payload"
         ) as build_payload:
-            from src.services.recommendation_service import RecommendationService
-
-            service = RecommendationService(config=config)
+            service = build_fast_service(config)
             service.recommendation_repo.save_batch = Mock()
             service.scoring_engine.score_batch = Mock(
                 return_value=[
@@ -327,6 +345,9 @@ class RecommendationServiceTestCase(unittest.TestCase):
                         priority=RecommendationPriority.BUY_NOW,
                     )
                 ]
+            )
+            service.sector_cache_service.get_or_fetch_sector = Mock(
+                return_value=SimpleNamespace(sector_name="Liquor")
             )
             build_payload.return_value = {
                 "code": "600519",
@@ -349,9 +370,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
     def test_get_recommendations_passthroughs_filters_and_total(self) -> None:
         config = SimpleNamespace(max_workers=2)
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=config)
+        service = build_fast_service(config)
         service.recommendation_repo.get_list = Mock(return_value=["item"])
         service.recommendation_repo.get_count = Mock(return_value=7)
 
@@ -379,9 +398,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
         )
 
     def test_get_priority_summary_from_repository(self) -> None:
-        from src.services.recommendation_service import RecommendationService
-
-        service = RecommendationService(config=SimpleNamespace(max_workers=2))
+        service = build_fast_service(SimpleNamespace(max_workers=2))
         service.recommendation_repo.get_priority_counts = Mock(
             return_value={"BUY_NOW": 1, "POSITION": 2}
         )

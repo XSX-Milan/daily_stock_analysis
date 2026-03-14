@@ -41,18 +41,10 @@ def completed_stage(signal: str, confidence: float, score_0_100: float) -> Stage
 
 class RecommendationEngineTestCase(unittest.TestCase):
     @patch("src.recommendation.engine.get_tool_registry")
-    @patch("src.recommendation.engine.RecommendationRiskAgent")
-    @patch("src.recommendation.engine.RecommendationMacroAgent")
-    @patch("src.recommendation.engine.RecommendationSentimentAgent")
-    @patch("src.recommendation.engine.RecommendationFundamentalAgent")
-    @patch("src.recommendation.engine.RecommendationTechnicalAgent")
+    @patch("src.recommendation.engine.RecommendationAgent")
     def test_init_builds_default_recommendation_agents(
         self,
-        technical_cls: Mock,
-        fundamental_cls: Mock,
-        sentiment_cls: Mock,
-        macro_cls: Mock,
-        risk_cls: Mock,
+        recommendation_cls: Mock,
         registry_fn: Mock,
     ) -> None:
         registry_fn.return_value = Mock()
@@ -62,11 +54,14 @@ class RecommendationEngineTestCase(unittest.TestCase):
             )
         )
         self.assertIsNotNone(engine)
-        technical_cls.assert_called_once()
-        fundamental_cls.assert_called_once()
-        sentiment_cls.assert_called_once()
-        macro_cls.assert_called_once()
-        risk_cls.assert_called_once()
+        self.assertEqual(recommendation_cls.call_count, 5)
+        called_dimensions = {
+            call.kwargs.get("dimension") for call in recommendation_cls.call_args_list
+        }
+        self.assertEqual(
+            called_dimensions,
+            {"technical", "fundamental", "sentiment", "macro", "risk"},
+        )
 
     def test_score_stock_uses_agent_opinion_scores_with_weights(self) -> None:
         agents = {

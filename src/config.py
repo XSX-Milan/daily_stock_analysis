@@ -11,6 +11,7 @@ A股自选股智能分析系统 - 配置管理模块
 """
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -37,6 +38,229 @@ class ConfigIssue:
 
     def __str__(self) -> str:  # noqa: D105
         return self.message
+
+
+_MANAGED_LITELLM_KEY_PROVIDERS = {
+    "gemini",
+    "vertex_ai",
+    "anthropic",
+    "openai",
+    "deepseek",
+}
+SUPPORTED_LLM_CHANNEL_PROTOCOLS = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "vertex_ai",
+    "deepseek",
+    "ollama",
+)
+_FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
+
+
+def parse_env_bool(value: Optional[str], default: bool = False) -> bool:
+    """Parse common truthy/falsey environment-style values."""
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    return normalized not in _FALSEY_ENV_VALUES
+
+
+def canonicalize_llm_channel_protocol(value: Optional[str]) -> str:
+    """Normalize a protocol label into a LiteLLM provider identifier."""
+    candidate = (value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "openai_compatible": "openai",
+        "openai_compat": "openai",
+        "claude": "anthropic",
+        "google": "gemini",
+        "vertex": "vertex_ai",
+        "vertexai": "vertex_ai",
+    }
+    return aliases.get(candidate, candidate)
+
+
+def resolve_llm_channel_protocol(
+    protocol: Optional[str],
+    *,
+    base_url: Optional[str] = None,
+    models: Optional[List[str]] = None,
+    channel_name: Optional[str] = None,
+) -> str:
+    """Resolve the effective protocol for a channel."""
+    explicit = canonicalize_llm_channel_protocol(protocol)
+    if explicit in SUPPORTED_LLM_CHANNEL_PROTOCOLS:
+        return explicit
+
+    for model in models or []:
+        if "/" not in model:
+            continue
+        prefix = canonicalize_llm_channel_protocol(model.split("/", 1)[0])
+        if prefix in SUPPORTED_LLM_CHANNEL_PROTOCOLS:
+            return prefix
+
+    # Infer from channel name (e.g. "deepseek" -> deepseek, "gemini" -> gemini)
+    if channel_name:
+        name_protocol = canonicalize_llm_channel_protocol(channel_name)
+        if name_protocol in SUPPORTED_LLM_CHANNEL_PROTOCOLS:
+            return name_protocol
+
+    if base_url:
+        parsed = urlparse(base_url)
+        if parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}:
+            # Default to openai for local servers (vLLM, LM Studio, LocalAI, etc.).
+            # Ollama users should set PROTOCOL=ollama explicitly or name the channel "ollama".
+            return "openai"
+        return "openai"
+
+    return ""
+
+
+def channel_allows_empty_api_key(
+    protocol: Optional[str], base_url: Optional[str]
+) -> bool:
+    """Return True when a channel can run without an API key."""
+    resolved_protocol = resolve_llm_channel_protocol(protocol, base_url=base_url)
+    if resolved_protocol == "ollama":
+        return True
+    parsed = urlparse(base_url or "")
+    return parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}
+
+
+def normalize_llm_channel_model(
+    model: str, protocol: Optional[str], base_url: Optional[str] = None
+) -> str:
+    """Attach a provider prefix when the model omits it."""
+    normalized_model = model.strip()
+    if not normalized_model:
+        return normalized_model
+
+    resolved_protocol = resolve_llm_channel_protocol(
+        protocol, base_url=base_url, models=[normalized_model]
+    )
+
+    if "/" in normalized_model:
+        # The model already has a slash, e.g. 'deepseek-ai/DeepSeek-V3'.
+        # Check if the prefix is a known LiteLLM provider; if so, keep it.
+        # Otherwise (e.g. HuggingFace-style IDs on SiliconFlow), prepend
+        # the resolved protocol so LiteLLM routes via the correct handler.
+        raw_prefix, remainder = normalized_model.split("/", 1)
+        prefix = raw_prefix.lower()
+        canonical_prefix = canonicalize_llm_channel_protocol(prefix)
+        known_providers = (
+            _MANAGED_LITELLM_KEY_PROVIDERS
+            | set(SUPPORTED_LLM_CHANNEL_PROTOCOLS)
+            | {
+                "cohere",
+                "huggingface",
+                "bedrock",
+                "sagemaker",
+                "azure",
+                "replicate",
+                "together_ai",
+                "palm",
+                "text-completion-openai",
+                "command-r",
+                "groq",
+                "cerebras",
+                "fireworks_ai",
+                "friendliai",
+            }
+        )
+        if prefix in known_providers:
+            return normalized_model
+        if canonical_prefix in known_providers:
+            return f"{canonical_prefix}/{remainder}"
+        # Not a real provider prefix — add one so LiteLLM routes correctly.
+        if resolved_protocol:
+            return f"{resolved_protocol}/{normalized_model}"
+        return normalized_model
+
+    if not resolved_protocol:
+        return normalized_model
+    return f"{resolved_protocol}/{normalized_model}"
+
+
+def get_configured_llm_models(model_list: List[Dict[str, Any]]) -> List[str]:
+    """Return non-legacy model names declared in Router model_list order.
+
+    Uses the top-level ``model_name`` (the routing alias that users set in
+    LITELLM_MODEL) rather than ``litellm_params.model`` (the wire-level
+    model identifier).  For channel-built entries both are identical, but
+    YAML configs may define a friendly alias that differs from the
+    underlying provider/model path.
+    """
+    models: List[str] = []
+    seen: set = set()
+    for entry in model_list or []:
+        # Prefer top-level model_name (router routing key); fall back to
+        # litellm_params.model for entries that omit it.
+        name = str(entry.get("model_name") or "").strip()
+        if not name:
+            params = entry.get("litellm_params", {}) or {}
+            name = str(params.get("model") or "").strip()
+        if not name or name.startswith("__legacy_") or name in seen:
+            continue
+        seen.add(name)
+        models.append(name)
+    return models
+
+
+def resolve_unified_llm_temperature(model: str) -> float:
+    """Resolve the unified LLM temperature with backward-compatible fallbacks."""
+    llm_temperature_raw = os.getenv("LLM_TEMPERATURE")
+    if llm_temperature_raw and llm_temperature_raw.strip():
+        try:
+            return float(llm_temperature_raw)
+        except (ValueError, TypeError):
+            pass
+
+    provider_temperature_env = {
+        "gemini": "GEMINI_TEMPERATURE",
+        "vertex_ai": "GEMINI_TEMPERATURE",
+        "anthropic": "ANTHROPIC_TEMPERATURE",
+        "openai": "OPENAI_TEMPERATURE",
+        "deepseek": "OPENAI_TEMPERATURE",
+    }
+    preferred_env = provider_temperature_env.get(_get_litellm_provider(model))
+    if preferred_env:
+        preferred_value = os.getenv(preferred_env)
+        if preferred_value and preferred_value.strip():
+            try:
+                return float(preferred_value)
+            except (ValueError, TypeError):
+                pass
+
+    for env_name in (
+        "GEMINI_TEMPERATURE",
+        "ANTHROPIC_TEMPERATURE",
+        "OPENAI_TEMPERATURE",
+    ):
+        env_value = os.getenv(env_name)
+        if env_value and env_value.strip():
+            try:
+                return float(env_value)
+            except (ValueError, TypeError):
+                continue
+
+    return 0.7
+
+
+def _get_litellm_provider(model: str) -> str:
+    """Extract the LiteLLM provider prefix from a model string."""
+    if not model:
+        return ""
+    if "/" in model:
+        return model.split("/", 1)[0]
+    return "openai"
+
+
+def _uses_direct_env_provider(model: str) -> bool:
+    """Whether runtime handles the model via direct litellm env/provider resolution."""
+    provider = _get_litellm_provider(model)
+    return bool(provider) and provider not in _MANAGED_LITELLM_KEY_PROVIDERS
 
 
 def setup_env(override: bool = False):
@@ -89,9 +313,14 @@ class Config:
         default_factory=list
     )  # Cross-model fallback list
 
+    # Unified temperature for all LLM calls (LLM_TEMPERATURE); legacy per-provider temps are fallback only
+    llm_temperature: float = 0.7
+
     # --- Multi-channel LLM config (new) ---
     # LITELLM_CONFIG: path to a standard litellm_config.yaml file (most powerful)
     litellm_config_path: Optional[str] = None
+    # Internal metadata: which config layer actually produced llm_model_list
+    llm_models_source: str = "legacy_env"
     # LLM_CHANNELS: list of channel dicts, each with name/base_url/api_keys/models
     llm_channels: List[Dict[str, Any]] = field(default_factory=list)
     # Pre-built LiteLLM Router model_list (populated from channels, YAML, or legacy keys)
@@ -150,9 +379,41 @@ class Config:
 
     # === Agent 模式配置 ===
     agent_mode: bool = False
+    _agent_mode_explicit: bool = False  # True when AGENT_MODE was explicitly set in env
     agent_max_steps: int = 10
     agent_skills: List[str] = field(default_factory=list)
     agent_strategy_dir: Optional[str] = None
+    agent_nl_routing: bool = False  # Enable natural language routing in bot dispatcher
+    agent_arch: str = (
+        "single"  # Agent architecture: 'single' (legacy) or 'multi' (orchestrator)
+    )
+    agent_orchestrator_mode: str = (
+        "standard"  # Orchestrator mode: quick/standard/full/strategy
+    )
+    agent_orchestrator_timeout_s: int = (
+        600  # Cooperative timeout budget for the whole multi-agent pipeline
+    )
+    agent_risk_override: bool = True  # Allow risk agent to veto buy signals
+    agent_deep_research_budget: int = 30000  # Max token budget for deep research
+    agent_deep_research_timeout: int = (
+        180  # Max seconds for /research command before returning timeout
+    )
+    agent_memory_enabled: bool = False  # Enable memory & calibration system
+    agent_strategy_autoweight: bool = (
+        True  # Auto-weight strategies by backtest performance
+    )
+    agent_strategy_routing: str = (
+        "auto"  # Strategy routing: 'auto' (regime-based) or 'manual'
+    )
+    agent_event_monitor_enabled: bool = (
+        False  # Enable periodic event-driven alert checks in schedule mode
+    )
+    agent_event_monitor_interval_minutes: int = (
+        5  # Polling interval for event monitor background checks
+    )
+    agent_event_alert_rules_json: str = (
+        ""  # JSON array of serialized EventMonitor rules
+    )
 
     # === 通知配置（可同时配置多个，全部推送）===
 
@@ -325,6 +586,20 @@ class Config:
     # 熔断器冷却时间（秒）
     circuit_breaker_cooldown: int = 300
 
+    # === 基本面聚合开关与降级保护 ===
+    # 全局总开关；关闭时返回 not_supported 并保持主流程无变化
+    enable_fundamental_pipeline: bool = True
+    # 基本面阶段总预算（秒）
+    fundamental_stage_timeout_seconds: float = 1.5
+    # 单能力源调用超时（秒）
+    fundamental_fetch_timeout_seconds: float = 0.8
+    # 单能力失败重试次数（已包含首次）
+    fundamental_retry_max: int = 1
+    # 基本面上下文短 TTL（秒）
+    fundamental_cache_ttl_seconds: int = 120
+    # 基本面缓存最大条目数（避免长时间运行内存增长）
+    fundamental_cache_max_entries: int = 256
+
     # Discord 机器人状态
     discord_bot_status: str = "A股智能分析 | /help"
 
@@ -376,6 +651,35 @@ class Config:
     # CONFIG_VALIDATE_MODE=warn (default): log all issues but always continue startup
     # CONFIG_VALIDATE_MODE=strict: exit(1) when any "error" severity issue is found
     config_validate_mode: str = "warn"
+
+    # --- Post-init validation ---------------------------------------------------
+    _VALID_AGENT_ARCH = {"single", "multi"}
+    _VALID_ORCHESTRATOR_MODES = {"quick", "standard", "full", "strategy"}
+    _VALID_STRATEGY_ROUTING = {"auto", "manual"}
+
+    def __post_init__(self) -> None:
+        _log = logging.getLogger(__name__)
+        if self.agent_arch not in self._VALID_AGENT_ARCH:
+            _log.warning(
+                "Invalid AGENT_ARCH=%r, falling back to 'single'. Valid: %s",
+                self.agent_arch,
+                self._VALID_AGENT_ARCH,
+            )
+            object.__setattr__(self, "agent_arch", "single")
+        if self.agent_orchestrator_mode not in self._VALID_ORCHESTRATOR_MODES:
+            _log.warning(
+                "Invalid AGENT_ORCHESTRATOR_MODE=%r, falling back to 'standard'. Valid: %s",
+                self.agent_orchestrator_mode,
+                self._VALID_ORCHESTRATOR_MODES,
+            )
+            object.__setattr__(self, "agent_orchestrator_mode", "standard")
+        if self.agent_strategy_routing not in self._VALID_STRATEGY_ROUTING:
+            _log.warning(
+                "Invalid AGENT_STRATEGY_ROUTING=%r, falling back to 'auto'. Valid: %s",
+                self.agent_strategy_routing,
+                self._VALID_STRATEGY_ROUTING,
+            )
+            object.__setattr__(self, "agent_strategy_routing", "auto")
 
     # 单例实例存储
     _instance: Optional["Config"] = None
@@ -543,12 +847,15 @@ class Config:
 
         # === LLM Channels + YAML config ===
         litellm_config_path = os.getenv("LITELLM_CONFIG", "").strip() or None
+        llm_models_source = "legacy_env"
         llm_channels: List[Dict[str, Any]] = []
         llm_model_list: List[Dict[str, Any]] = []
 
         # Priority 1: LITELLM_CONFIG (standard LiteLLM YAML config file)
         if litellm_config_path:
             llm_model_list = cls._parse_litellm_yaml(litellm_config_path)
+            if llm_model_list:
+                llm_models_source = "litellm_config"
 
         # Priority 2: LLM_CHANNELS (env var based channel config)
         if not llm_model_list:
@@ -556,6 +863,8 @@ class Config:
             if _channels_str:
                 llm_channels = cls._parse_llm_channels(_channels_str)
                 llm_model_list = cls._channels_to_model_list(llm_channels)
+                if llm_model_list:
+                    llm_models_source = "llm_channels"
 
         # Priority 3: Legacy env vars → auto-build model_list (backward compatible)
         if not llm_model_list:
@@ -567,6 +876,8 @@ class Config:
                 or ("https://aihubmix.com/v1" if os.getenv("AIHUBMIX_KEY") else None),
                 deepseek_api_keys,
             )
+            if llm_model_list:
+                llm_models_source = "legacy_env"
 
         # Auto-infer LITELLM_MODEL from channels when not explicitly set
         if not litellm_model and llm_channels:
@@ -642,7 +953,9 @@ class Config:
             tushare_token=os.getenv("TUSHARE_TOKEN"),
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
+            llm_temperature=resolve_unified_llm_temperature(litellm_model),
             litellm_config_path=litellm_config_path,
+            llm_models_source=llm_models_source,
             llm_channels=llm_channels,
             llm_model_list=llm_model_list,
             gemini_api_keys=gemini_api_keys,
@@ -692,11 +1005,43 @@ class Config:
             news_max_age_days=max(1, int(os.getenv("NEWS_MAX_AGE_DAYS", "3"))),
             bias_threshold=max(1.0, float(os.getenv("BIAS_THRESHOLD", "5.0"))),
             agent_mode=os.getenv("AGENT_MODE", "false").lower() == "true",
+            _agent_mode_explicit=os.getenv("AGENT_MODE") is not None,
             agent_max_steps=int(os.getenv("AGENT_MAX_STEPS", "10")),
             agent_skills=[
                 s.strip() for s in os.getenv("AGENT_SKILLS", "").split(",") if s.strip()
             ],
             agent_strategy_dir=os.getenv("AGENT_STRATEGY_DIR"),
+            agent_nl_routing=os.getenv("AGENT_NL_ROUTING", "false").lower() == "true",
+            agent_arch=os.getenv("AGENT_ARCH", "single").lower(),
+            agent_orchestrator_mode=os.getenv(
+                "AGENT_ORCHESTRATOR_MODE", "standard"
+            ).lower(),
+            agent_orchestrator_timeout_s=max(
+                0, int(os.getenv("AGENT_ORCHESTRATOR_TIMEOUT_S", "600"))
+            ),
+            agent_risk_override=os.getenv("AGENT_RISK_OVERRIDE", "true").lower()
+            == "true",
+            agent_deep_research_budget=int(
+                os.getenv("AGENT_DEEP_RESEARCH_BUDGET", "30000")
+            ),
+            agent_deep_research_timeout=max(
+                30, int(os.getenv("AGENT_DEEP_RESEARCH_TIMEOUT", "180"))
+            ),
+            agent_memory_enabled=os.getenv("AGENT_MEMORY_ENABLED", "false").lower()
+            == "true",
+            agent_strategy_autoweight=os.getenv(
+                "AGENT_STRATEGY_AUTOWEIGHT", "true"
+            ).lower()
+            == "true",
+            agent_strategy_routing=os.getenv("AGENT_STRATEGY_ROUTING", "auto").lower(),
+            agent_event_monitor_enabled=os.getenv(
+                "AGENT_EVENT_MONITOR_ENABLED", "false"
+            ).lower()
+            == "true",
+            agent_event_monitor_interval_minutes=max(
+                1, int(os.getenv("AGENT_EVENT_MONITOR_INTERVAL_MINUTES", "5"))
+            ),
+            agent_event_alert_rules_json=os.getenv("AGENT_EVENT_ALERT_RULES_JSON", ""),
             wechat_webhook_url=os.getenv("WECHAT_WEBHOOK_URL"),
             feishu_webhook_url=os.getenv("FEISHU_WEBHOOK_URL"),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN"),
@@ -880,6 +1225,23 @@ class Config:
             realtime_source_priority=cls._resolve_realtime_source_priority(),
             realtime_cache_ttl=int(os.getenv("REALTIME_CACHE_TTL", "600")),
             circuit_breaker_cooldown=int(os.getenv("CIRCUIT_BREAKER_COOLDOWN", "300")),
+            enable_fundamental_pipeline=os.getenv(
+                "ENABLE_FUNDAMENTAL_PIPELINE", "true"
+            ).lower()
+            == "true",
+            fundamental_stage_timeout_seconds=float(
+                os.getenv("FUNDAMENTAL_STAGE_TIMEOUT_SECONDS", "1.5")
+            ),
+            fundamental_fetch_timeout_seconds=float(
+                os.getenv("FUNDAMENTAL_FETCH_TIMEOUT_SECONDS", "0.8")
+            ),
+            fundamental_retry_max=int(os.getenv("FUNDAMENTAL_RETRY_MAX", "1")),
+            fundamental_cache_ttl_seconds=int(
+                os.getenv("FUNDAMENTAL_CACHE_TTL_SECONDS", "120")
+            ),
+            fundamental_cache_max_entries=int(
+                os.getenv("FUNDAMENTAL_CACHE_MAX_ENTRIES", "256")
+            ),
         )
 
     @classmethod
@@ -939,9 +1301,11 @@ class Config:
 
         Format:
             LLM_CHANNELS=aihubmix,deepseek,gemini
+            LLM_AIHUBMIX_PROTOCOL=openai
             LLM_AIHUBMIX_BASE_URL=https://aihubmix.com/v1
             LLM_AIHUBMIX_API_KEY=sk-xxx           (or LLM_AIHUBMIX_API_KEYS=k1,k2)
-            LLM_AIHUBMIX_MODELS=openai/gpt-4o-mini,openai/claude-3-5-sonnet
+            LLM_AIHUBMIX_MODELS=gpt-4o-mini,claude-3-5-sonnet
+            LLM_AIHUBMIX_ENABLED=true
         """
         import logging
 
@@ -955,6 +1319,8 @@ class Config:
             ch_upper = ch_name.upper()
 
             base_url = os.getenv(f"LLM_{ch_upper}_BASE_URL", "").strip() or None
+            protocol_raw = os.getenv(f"LLM_{ch_upper}_PROTOCOL", "").strip()
+            enabled = parse_env_bool(os.getenv(f"LLM_{ch_upper}_ENABLED"), default=True)
 
             # API keys: LLM_{NAME}_API_KEYS (multi) > LLM_{NAME}_API_KEY (single)
             api_keys_raw = os.getenv(f"LLM_{ch_upper}_API_KEYS", "")
@@ -966,10 +1332,15 @@ class Config:
 
             # Models
             models_raw = os.getenv(f"LLM_{ch_upper}_MODELS", "")
-            models = [m.strip() for m in models_raw.split(",") if m.strip()]
-            # Auto-prefix: models without provider prefix in channels with base_url → openai/
+            raw_models = [m.strip() for m in models_raw.split(",") if m.strip()]
+            protocol = resolve_llm_channel_protocol(
+                protocol_raw,
+                base_url=base_url,
+                models=raw_models,
+                channel_name=ch_name,
+            )
             models = [
-                (f"openai/{m}" if "/" not in m and base_url else m) for m in models
+                normalize_llm_channel_model(m, protocol, base_url) for m in raw_models
             ]
 
             # Extra headers (JSON string, optional)
@@ -982,6 +1353,25 @@ class Config:
                     _logger.warning(
                         f"LLM_{ch_upper}_EXTRA_HEADERS: invalid JSON, ignored"
                     )
+
+            if not enabled:
+                _logger.info(f"LLM channel '{ch_name}': disabled, skipped")
+                continue
+
+            if (
+                protocol_raw
+                and canonicalize_llm_channel_protocol(protocol_raw)
+                not in SUPPORTED_LLM_CHANNEL_PROTOCOLS
+            ):
+                _logger.warning(
+                    "LLM_%s_PROTOCOL=%s is unsupported; auto-detected protocol=%s",
+                    ch_upper,
+                    protocol_raw,
+                    protocol or "unknown",
+                )
+
+            if not api_keys and channel_allows_empty_api_key(protocol, base_url):
+                api_keys = [""]
 
             if not api_keys:
                 _logger.warning(
@@ -997,6 +1387,8 @@ class Config:
             channels.append(
                 {
                     "name": ch_name.lower(),
+                    "protocol": protocol,
+                    "enabled": enabled,
                     "base_url": base_url,
                     "api_keys": api_keys,
                     "models": models,
@@ -1018,10 +1410,9 @@ class Config:
         for ch in channels:
             for model_name in ch["models"]:
                 for api_key in ch["api_keys"]:
-                    litellm_params: Dict[str, Any] = {
-                        "model": model_name,
-                        "api_key": api_key,
-                    }
+                    litellm_params: Dict[str, Any] = {"model": model_name}
+                    if api_key:
+                        litellm_params["api_key"] = api_key
                     if ch["base_url"]:
                         litellm_params["api_base"] = ch["base_url"]
                     # Auto-inject aihubmix sponsored header
@@ -1218,6 +1609,32 @@ class Config:
         """重置单例（主要用于测试）"""
         cls._instance = None
 
+    def is_agent_available(self) -> bool:
+        """Check whether agent capabilities are usable.
+
+        Decision table:
+
+        +-----------------------+-------------------+---------+
+        | AGENT_MODE env        | LITELLM_MODEL set | Result  |
+        +-----------------------+-------------------+---------+
+        | ``true``              | any               | True    |
+        | ``false`` (explicit)  | any               | False   |
+        | not set (default)     | yes               | True    |
+        | not set (default)     | no                | False   |
+        +-----------------------+-------------------+---------+
+
+        This keeps backward compatibility: users who never touch
+        ``AGENT_MODE`` get agent features automatically once they configure
+        a model, while ``AGENT_MODE=false`` acts as an explicit kill-switch.
+        """
+        # Explicit AGENT_MODE takes full precedence
+        if self._agent_mode_explicit:
+            return self.agent_mode
+        # Auto-detect: if LITELLM_MODEL is set, agent is implicitly available
+        if self.litellm_model:
+            return True
+        return False
+
     def refresh_stock_list(self) -> None:
         """
         热读取 STOCK_LIST 环境变量并更新配置中的自选股列表
@@ -1289,10 +1706,13 @@ class Config:
             )
 
         # --- LLM availability ---
-        # llm_model_list is populated for ALL three config tiers (YAML / channels /
-        # legacy keys), so it is the canonical signal that at least one LLM is
-        # configured, regardless of which tier the user chose.
-        if not self.llm_model_list:
+        # llm_model_list is populated for YAML / channels / managed legacy keys.
+        # Other LiteLLM-native providers (for example cohere/*) run through the
+        # direct litellm env path and therefore do not populate llm_model_list.
+        has_direct_env_model = bool(self.litellm_model) and _uses_direct_env_provider(
+            self.litellm_model
+        )
+        if not self.llm_model_list and not has_direct_env_model:
             issues.append(
                 ConfigIssue(
                     severity="error",
@@ -1314,6 +1734,60 @@ class Config:
                     field="LITELLM_MODEL",
                 )
             )
+
+        available_router_models = get_configured_llm_models(self.llm_model_list)
+        available_router_model_set = set(available_router_models)
+        if available_router_model_set:
+            if (
+                self.litellm_model
+                and not _uses_direct_env_provider(self.litellm_model)
+                and self.litellm_model not in available_router_model_set
+            ):
+                issues.append(
+                    ConfigIssue(
+                        severity="error",
+                        message=(
+                            "LITELLM_MODEL 已配置，但当前渠道/配置文件中不存在该模型。"
+                            f" 当前可用模型：{', '.join(available_router_models[:6])}"
+                        ),
+                        field="LITELLM_MODEL",
+                    )
+                )
+
+            invalid_fallbacks = [
+                model
+                for model in (self.litellm_fallback_models or [])
+                if model
+                and model not in available_router_model_set
+                and not _uses_direct_env_provider(model)
+            ]
+            if invalid_fallbacks:
+                issues.append(
+                    ConfigIssue(
+                        severity="warning",
+                        message=(
+                            "LITELLM_FALLBACK_MODELS 中包含未在当前渠道声明的模型："
+                            f"{', '.join(invalid_fallbacks[:3])}"
+                        ),
+                        field="LITELLM_FALLBACK_MODELS",
+                    )
+                )
+
+            if (
+                self.vision_model
+                and not _uses_direct_env_provider(self.vision_model)
+                and self.vision_model not in available_router_model_set
+            ):
+                issues.append(
+                    ConfigIssue(
+                        severity="warning",
+                        message=(
+                            "VISION_MODEL 未出现在当前渠道声明中。"
+                            f" 当前可用模型：{', '.join(available_router_models[:6])}"
+                        ),
+                        field="VISION_MODEL",
+                    )
+                )
 
         # --- Search engine (informational only) ---
         if not (
@@ -1459,13 +1933,14 @@ def get_api_keys_for_model(model: str, config: Config) -> List[str]:
     selection, so this function is not needed.  Kept for backward compat when
     no Router is built and a direct litellm.completion() call is needed.
     """
-    if model.startswith("gemini/") or model.startswith("vertex_ai/"):
+    provider = _get_litellm_provider(model)
+    if provider in {"gemini", "vertex_ai"}:
         return [k for k in config.gemini_api_keys if k and len(k) >= 8]
-    if model.startswith("anthropic/"):
+    if provider == "anthropic":
         return [k for k in config.anthropic_api_keys if k and len(k) >= 8]
-    if model.startswith("deepseek/"):
+    if provider == "deepseek":
         return [k for k in config.deepseek_api_keys if k and len(k) >= 8]
-    if model.startswith("openai/") or "/" not in model:
+    if provider == "openai":
         return [k for k in config.openai_api_keys if k and len(k) >= 8]
     # Other LiteLLM-native providers – API key resolved from env vars
     return []

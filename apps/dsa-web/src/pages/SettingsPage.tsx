@@ -56,13 +56,50 @@ const SettingsPage: React.FC = () => {
   }, [clearToast, toast]);
 
   const rawActiveItems = itemsByCategory[activeCategory] || [];
+  const rawActiveItemMap = new Map(rawActiveItems.map((item) => [item.key, String(item.value ?? '')]));
+  const hasConfiguredChannels = Boolean((rawActiveItemMap.get('LLM_CHANNELS') || '').trim());
+  const hasLitellmConfig = Boolean((rawActiveItemMap.get('LITELLM_CONFIG') || '').trim());
 
-  // Hide per-channel LLM_*_ env vars from the normal field list;
-  // they are managed by the LLMChannelEditor component instead.
-  const LLM_CHANNEL_KEY_RE = /^LLM_[A-Z0-9]+_(BASE_URL|API_KEY|API_KEYS|MODELS|EXTRA_HEADERS)$/;
+  // Hide channel-managed and legacy provider-specific LLM keys from the
+  // generic form only when channel config is the active runtime source.
+  const LLM_CHANNEL_KEY_RE = /^LLM_[A-Z0-9]+_(PROTOCOL|BASE_URL|API_KEY|API_KEYS|MODELS|EXTRA_HEADERS|ENABLED)$/;
+  const AI_MODEL_HIDDEN_KEYS = new Set([
+    'LLM_CHANNELS',
+    'LLM_TEMPERATURE',
+    'LITELLM_MODEL',
+    'LITELLM_FALLBACK_MODELS',
+    'AIHUBMIX_KEY',
+    'DEEPSEEK_API_KEY',
+    'DEEPSEEK_API_KEYS',
+    'GEMINI_API_KEY',
+    'GEMINI_API_KEYS',
+    'GEMINI_MODEL',
+    'GEMINI_MODEL_FALLBACK',
+    'GEMINI_TEMPERATURE',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_API_KEYS',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_TEMPERATURE',
+    'ANTHROPIC_MAX_TOKENS',
+    'OPENAI_API_KEY',
+    'OPENAI_API_KEYS',
+    'OPENAI_BASE_URL',
+    'OPENAI_MODEL',
+    'OPENAI_VISION_MODEL',
+    'OPENAI_TEMPERATURE',
+    'VISION_MODEL',
+  ]);
   const activeItems =
     activeCategory === 'ai_model'
-      ? rawActiveItems.filter((item) => !LLM_CHANNEL_KEY_RE.test(item.key))
+      ? rawActiveItems.filter((item) => {
+        if (hasConfiguredChannels && LLM_CHANNEL_KEY_RE.test(item.key)) {
+          return false;
+        }
+        if (hasConfiguredChannels && !hasLitellmConfig && AI_MODEL_HIDDEN_KEYS.has(item.key)) {
+          return false;
+        }
+        return true;
+      })
       : rawActiveItems;
 
   return (

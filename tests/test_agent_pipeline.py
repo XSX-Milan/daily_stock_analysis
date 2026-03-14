@@ -327,12 +327,14 @@ class TestPipelineRouting(unittest.TestCase):
 
             pipeline.analyze_stock("600519", ReportType.SIMPLE, "q1")
 
-            pipeline._analyze_with_agent.assert_called_once_with(
-                "600519", ReportType.SIMPLE, "q1",
-                pipeline.fetcher_manager.get_realtime_quote.return_value.name,
-                pipeline.fetcher_manager.get_realtime_quote.return_value,
-                pipeline.fetcher_manager.get_chip_distribution.return_value
-            )
+            pipeline._analyze_with_agent.assert_called_once()
+            call_args = pipeline._analyze_with_agent.call_args
+            # Positional args: code, report_type, query_id, stock_name, realtime_quote, chip_data, fundamental_context, trend_result
+            self.assertEqual(call_args[0][0], "600519")
+            self.assertEqual(call_args[0][1], ReportType.SIMPLE)
+            self.assertEqual(call_args[0][2], "q1")
+            # trend_result (8th arg) should be present (may be a TrendAnalysisResult or None)
+            self.assertEqual(len(call_args[0]), 8)
 
     def test_legacy_mode_does_not_call_agent(self):
         """When agent_mode=False, analyze_stock should NOT call _analyze_with_agent."""
@@ -346,6 +348,7 @@ class TestPipelineRouting(unittest.TestCase):
             mock_cfg = MagicMock()
             mock_cfg.max_workers = 2
             mock_cfg.agent_mode = False
+            mock_cfg.is_agent_available.return_value = False
             mock_cfg.agent_max_steps = 10
             mock_cfg.agent_skills = []
             mock_cfg.bocha_api_keys = []

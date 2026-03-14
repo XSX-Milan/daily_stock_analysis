@@ -25,7 +25,7 @@ from src.config import get_config, Config
 from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.realtime_types import ChipDistribution
-from src.analyzer import GeminiAnalyzer, AnalysisResult, fill_chip_structure_if_needed
+from src.analyzer import GeminiAnalyzer, AnalysisResult, fill_chip_structure_if_needed, fill_price_position_if_needed
 from src.data.stock_mapping import STOCK_NAME_MAP
 from src.notification import NotificationService, NotificationChannel
 from src.search_service import SearchService
@@ -106,7 +106,7 @@ class StockAnalysisPipeline:
             logger.info("搜索服务已启用 (Tavily/SerpAPI)")
         else:
             logger.warning("搜索服务未启用（未配置 API Key）")
-    
+
     def fetch_and_save_stock_data(
         self, 
         code: str,
@@ -220,7 +220,11 @@ class StockAnalysisPipeline:
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 获取筹码分布失败: {e}")
 
-            # If agent mode is enabled, or specific agent skills are configured, use the Agent analysis pipeline
+            # If agent mode is explicitly enabled, or specific agent skills are configured, use the Agent analysis pipeline.
+            # NOTE: use config.agent_mode (explicit opt-in) instead of
+            # config.is_agent_available() so that users who only configured an
+            # API Key for the traditional analysis path are not silently
+            # switched to Agent mode (which is slower and more expensive).
             use_agent = getattr(self.config, 'agent_mode', False)
             if not use_agent:
                 # Auto-enable agent mode when specific skills are configured (e.g., scheduled task with strategy)
@@ -229,11 +233,32 @@ class StockAnalysisPipeline:
                     use_agent = True
                     logger.info(f"{stock_name}({code}) Auto-enabled agent mode due to configured skills: {configured_skills}")
 
-            if use_agent:
-                logger.info(f"{stock_name}({code}) 启用 Agent 模式进行分析")
-                return self._analyze_with_agent(code, report_type, query_id, stock_name, realtime_quote, chip_data)
-            
-            # Step 3: 趋势分析（基于交易理念）
+            # Step 2.5: 基本面能力聚合（统一入口，异常降级）
+            # - 失败时返回 partial/failed，不影响既有技术面/新闻链路
+            # - 关闭开关时仍返回 not_supported 结构
+            fundamental_context = None
+            try:
+                fundamental_context = self.fetcher_manager.get_fundamental_context(
+                    code,
+                    budget_seconds=getattr(self.config, 'fundamental_stage_timeout_seconds', 1.5),
+                )
+            except Exception as e:
+                logger.warning(f"{stock_name}({code}) 基本面聚合失败: {e}")
+                fundamental_context = self.fetcher_manager.build_failed_fundamental_context(code, str(e))
+
+            # P0: write-only snapshot, fail-open, no read dependency on this table.
+            try:
+                self.db.save_fundamental_snapshot(
+                    query_id=query_id,
+                    code=code,
+                    payload=fundamental_context,
+                    source_chain=fundamental_context.get("source_chain", []),
+                    coverage=fundamental_context.get("coverage", {}),
+                )
+            except Exception as e:
+                logger.debug(f"{stock_name}({code}) 基本面快照写入失败: {e}")
+
+            # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
             try:
                 end_date = date.today()
@@ -249,6 +274,19 @@ class StockAnalysisPipeline:
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
                 logger.warning(f"{stock_name}({code}) 趋势分析失败: {e}", exc_info=True)
+
+            if use_agent:
+                logger.info(f"{stock_name}({code}) 启用 Agent 模式进行分析")
+                return self._analyze_with_agent(
+                    code,
+                    report_type,
+                    query_id,
+                    stock_name,
+                    realtime_quote,
+                    chip_data,
+                    fundamental_context,
+                    trend_result,
+                )
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
             news_context = None
@@ -307,9 +345,10 @@ class StockAnalysisPipeline:
             enhanced_context = self._enhance_context(
                 context, 
                 realtime_quote, 
-                chip_data, 
+                chip_data,
                 trend_result,
-                stock_name  # 传入股票名称
+                stock_name,  # 传入股票名称
+                fundamental_context,
             )
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
@@ -325,6 +364,10 @@ class StockAnalysisPipeline:
             # Step 7.6: chip_structure fallback (Issue #589)
             if result and chip_data:
                 fill_chip_structure_if_needed(result, chip_data)
+
+            # Step 7.7: price_position fallback
+            if result:
+                fill_price_position_if_needed(result, trend_result, realtime_quote)
 
             # Step 8: 保存分析历史记录
             if result:
@@ -359,7 +402,8 @@ class StockAnalysisPipeline:
         realtime_quote,
         chip_data: Optional[ChipDistribution],
         trend_result: Optional[TrendAnalysisResult],
-        stock_name: str = ""
+        stock_name: str = "",
+        fundamental_context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -500,6 +544,16 @@ class StockAnalysisPipeline:
             context.get('code', ''), enhanced.get('stock_name', stock_name)
         )
 
+        # P0: append unified fundamental block; keep as additional context only
+        enhanced["fundamental_context"] = (
+            fundamental_context
+            if isinstance(fundamental_context, dict)
+            else self.fetcher_manager.build_failed_fundamental_context(
+                context.get("code", ""),
+                "invalid fundamental context",
+            )
+        )
+
         return enhanced
 
     def _analyze_with_agent(
@@ -509,7 +563,9 @@ class StockAnalysisPipeline:
         query_id: str,
         stock_name: str,
         realtime_quote: Any,
-        chip_data: Optional[ChipDistribution]
+        chip_data: Optional[ChipDistribution],
+        fundamental_context: Optional[Dict[str, Any]] = None,
+        trend_result: Optional[TrendAnalysisResult] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
@@ -525,12 +581,15 @@ class StockAnalysisPipeline:
                 "stock_code": code,
                 "stock_name": stock_name,
                 "report_type": report_type.value,
+                "fundamental_context": fundamental_context,
             }
             
             if realtime_quote:
                 initial_context["realtime_quote"] = self._safe_to_dict(realtime_quote)
             if chip_data:
                 initial_context["chip_distribution"] = self._safe_to_dict(chip_data)
+            if trend_result:
+                initial_context["trend_result"] = self._safe_to_dict(trend_result)
 
             # 运行 Agent
             message = f"请分析股票 {code} ({stock_name})，并生成决策仪表盘报告。"
@@ -554,6 +613,10 @@ class StockAnalysisPipeline:
             # chip_structure fallback (Issue #589), before save_analysis_history
             if result and chip_data:
                 fill_chip_structure_if_needed(result, chip_data)
+
+            # price_position fallback (same as non-agent path Step 7.7)
+            if result:
+                fill_price_position_if_needed(result, trend_result, realtime_quote)
 
             resolved_stock_name = result.name if result and result.name else stock_name
 
@@ -615,7 +678,7 @@ class StockAnalysisPipeline:
             trend_prediction="未知",
             operation_advice="观望",
             success=agent_result.success,
-            error_message=agent_result.error if not agent_result.success else None,
+            error_message=agent_result.error or None,
             data_sources=f"agent:{agent_result.provider}",
             model_used=agent_result.model or None,
         )
@@ -628,7 +691,11 @@ class StockAnalysisPipeline:
             result.sentiment_score = self._safe_int(dash.get("sentiment_score"), 50)
             result.trend_prediction = dash.get("trend_prediction", "未知")
             result.operation_advice = dash.get("operation_advice", "观望")
-            result.decision_type = dash.get("decision_type", "hold")
+            from src.agent.protocols import normalize_decision_signal
+
+            result.decision_type = normalize_decision_signal(
+                dash.get("decision_type", "hold")
+            )
             result.analysis_summary = dash.get("analysis_summary", "")
             # The AI returns a top-level dict that contains a nested 'dashboard' sub-key
             # with core_conclusion / battle_plan / intelligence.  AnalysisResult's helper
@@ -920,10 +987,15 @@ class StockAnalysisPipeline:
             result = self.analyze_stock(code, report_type, query_id=effective_query_id)
             
             if result:
-                logger.info(
-                    f"[{code}] 分析完成: {result.operation_advice}, "
-                    f"评分 {result.sentiment_score}"
-                )
+                if not result.success:
+                    logger.warning(
+                        f"[{code}] 分析未成功: {result.error_message or '未知错误'}"
+                    )
+                else:
+                    logger.info(
+                        f"[{code}] 分析完成: {result.operation_advice}, "
+                        f"评分 {result.sentiment_score}"
+                    )
                 
                 # 单股推送模式（#55）：每分析完一只股票立即推送
                 if single_stock_notify and self.notifier.is_available():
@@ -1281,7 +1353,8 @@ class StockAnalysisPipeline:
                 logger.info("通知渠道未配置，跳过推送")
                 
         except Exception as e:
-            logger.error(f"发送通知失败: {e}")
+            import traceback
+            logger.error(f"发送通知失败: {e}\n{traceback.format_exc()}")
 
     def _generate_aggregate_report(
         self,

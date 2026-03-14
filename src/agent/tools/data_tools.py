@@ -9,7 +9,6 @@ Tools:
 - get_analysis_context: historical analysis context from DB
 """
 
-import json
 import logging
 from typing import Optional
 
@@ -28,6 +27,36 @@ def _get_db():
     """Lazy import for DatabaseManager."""
     from src.storage import get_db
     return get_db()
+
+
+def _compact_fundamental_context(fundamental_context: dict) -> dict:
+    """Reduce token footprint for tool responses while keeping key semantics."""
+    if not isinstance(fundamental_context, dict):
+        return {}
+    blocks = (
+        "valuation",
+        "growth",
+        "earnings",
+        "institution",
+        "capital_flow",
+        "dragon_tiger",
+        "boards",
+    )
+    compact = {
+        "market": fundamental_context.get("market"),
+        "status": fundamental_context.get("status"),
+        "coverage": fundamental_context.get("coverage", {}),
+    }
+    for block in blocks:
+        payload = fundamental_context.get(block, {})
+        if isinstance(payload, dict):
+            compact[block] = {
+                "status": payload.get("status"),
+                "data": payload.get("data", {}),
+            }
+        else:
+            compact[block] = {"status": "failed", "data": {}}
+    return compact
 
 
 # ============================================================
@@ -221,68 +250,46 @@ get_analysis_context_tool = ToolDefinition(
 # ============================================================
 
 def _handle_get_stock_info(stock_code: str) -> dict:
-    """Get stock fundamental information including industry, financials, and valuation."""
-    # Try EfinanceFetcher.get_base_info first (most complete)
-    try:
-        from data_provider.efinance_fetcher import EfinanceFetcher
-        fetcher = EfinanceFetcher()
-        info = fetcher.get_base_info(stock_code)
-        if info:
-            # Sanitise: convert non-serialisable types and remove NaN
-            import math
-            clean: dict = {}
-            for k, v in info.items():
-                if isinstance(v, float) and math.isnan(v):
-                    clean[k] = None
-                else:
-                    try:
-                        import json as _json
-                        _json.dumps(v)       # test serialisability
-                        clean[k] = v
-                    except (TypeError, ValueError):
-                        clean[k] = str(v)
-
-            # Also try to get board/sector membership
-            try:
-                board_df = fetcher.get_belong_board(stock_code)
-                if board_df is not None and not board_df.empty:
-                    # Typically columns: 板块名称, 板块代码, 涨跌幅, …
-                    boards = board_df.to_dict(orient="records")
-                    # Keep only name + change columns to limit token usage
-                    clean["belong_boards"] = [
-                        {k2: (str(v2) if not isinstance(v2, (int, float, str, type(None))) else v2)
-                         for k2, v2 in row.items()
-                         if any(kw in str(k2) for kw in ["名称", "代码", "涨跌", "板块"])}
-                        for row in boards[:10]
-                    ]
-            except Exception:
-                pass
-
-            return clean
-    except Exception as e:
-        logger.warning(f"get_stock_info via EfinanceFetcher failed for {stock_code}: {e}")
-
-    # Fallback: derive from realtime quote (valuation metrics only)
+    """Get stock fundamental information through unified fundamental context."""
     manager = _get_fetcher_manager()
-    quote = manager.get_realtime_quote(stock_code)
-    if quote:
-        return {
-            "code": quote.code,
-            "name": quote.name,
-            "pe_ratio": quote.pe_ratio,
-            "pb_ratio": quote.pb_ratio,
-            "total_mv": quote.total_mv,
-            "circ_mv": quote.circ_mv,
-            "note": "Basic info only — EfinanceFetcher unavailable",
-        }
-    return {"error": f"Unable to fetch stock info for {stock_code}"}
+    try:
+        fundamental_context = manager.get_fundamental_context(stock_code)
+    except Exception as e:
+        logger.warning(f"get_stock_info via fundamental pipeline failed for {stock_code}: {e}")
+        fundamental_context = manager.build_failed_fundamental_context(stock_code, str(e))
+
+    compact_context = _compact_fundamental_context(fundamental_context)
+    valuation = compact_context.get("valuation", {}).get("data", {})
+    sector_rankings = compact_context.get("boards", {}).get("data", {})
+    belong_boards = manager.get_belong_boards(stock_code)
+
+    stock_name = stock_code.upper()
+    try:
+        stock_name = manager.get_stock_name(stock_code) or stock_name
+    except Exception:
+        pass
+
+    return {
+        "code": stock_code.upper(),
+        "name": stock_name,
+        "pe_ratio": valuation.get("pe_ratio"),
+        "pb_ratio": valuation.get("pb_ratio"),
+        "total_mv": valuation.get("total_mv"),
+        "circ_mv": valuation.get("circ_mv"),
+        "fundamental_context": compact_context,
+        "belong_boards": belong_boards,
+        # Compatibility alias for existing callers; prefer belong_boards.
+        # Planned for future deprecation in a major version.
+        "boards": belong_boards,
+        "sector_rankings": sector_rankings,
+    }
 
 
 get_stock_info_tool = ToolDefinition(
     name="get_stock_info",
-    description="Get stock fundamental information: industry classification, ROE, net profit margin, "
-                "PE ratio, PB ratio, revenue, earnings, market cap, and sector membership. "
-                "Best for fundamental analysis and background research on a stock.",
+    description="Get stock fundamental information: valuation, growth, earnings, institution flow, "
+                "stock sector membership (belong_boards; boards is compatibility alias) and "
+                "sector rankings. Returns a compact fundamental_context to reduce token usage.",
     parameters=[
         ToolParameter(
             name="stock_code",

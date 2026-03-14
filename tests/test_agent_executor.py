@@ -28,6 +28,7 @@ except ModuleNotFoundError:
 
 from src.agent.executor import AgentExecutor, AgentResult
 from src.agent.llm_adapter import LLMResponse, ToolCall
+from src.agent.runner import parse_dashboard_json, serialize_tool_result
 from src.agent.tools.registry import ToolRegistry, ToolDefinition, ToolParameter
 
 
@@ -317,35 +318,30 @@ class TestAgentExecutor(unittest.TestCase):
 # ============================================================
 
 class TestDashboardParsing(unittest.TestCase):
-    """Test _parse_dashboard with various input formats."""
-
-    def setUp(self):
-        self.executor = AgentExecutor(
-            ToolRegistry(), _make_mock_adapter(), max_steps=1
-        )
+    """Test parse_dashboard_json with various input formats."""
 
     def test_parse_markdown_json_block(self):
         content = f"Here is my analysis:\n```json\n{json.dumps(SAMPLE_DASHBOARD)}\n```\nDone."
-        result = self.executor._parse_dashboard(content)
+        result = parse_dashboard_json(content)
         self.assertIsNotNone(result)
         self.assertEqual(result["sentiment_score"], 75)
 
     def test_parse_raw_json(self):
         content = json.dumps(SAMPLE_DASHBOARD)
-        result = self.executor._parse_dashboard(content)
+        result = parse_dashboard_json(content)
         self.assertIsNotNone(result)
 
     def test_parse_json_in_text(self):
         content = f"Let me present: {json.dumps(SAMPLE_DASHBOARD)} — that's all."
-        result = self.executor._parse_dashboard(content)
+        result = parse_dashboard_json(content)
         self.assertIsNotNone(result)
 
     def test_parse_empty_content(self):
-        self.assertIsNone(self.executor._parse_dashboard(""))
-        self.assertIsNone(self.executor._parse_dashboard(None))
+        self.assertIsNone(parse_dashboard_json(""))
+        self.assertIsNone(parse_dashboard_json(None))
 
     def test_parse_no_json(self):
-        self.assertIsNone(self.executor._parse_dashboard("This is just plain text with no JSON"))
+        self.assertIsNone(parse_dashboard_json("This is just plain text with no JSON"))
 
 
 # ============================================================
@@ -353,29 +349,24 @@ class TestDashboardParsing(unittest.TestCase):
 # ============================================================
 
 class TestSerializeToolResult(unittest.TestCase):
-    """Test _serialize_tool_result for various types."""
-
-    def setUp(self):
-        self.executor = AgentExecutor(
-            ToolRegistry(), _make_mock_adapter(), max_steps=1
-        )
+    """Test serialize_tool_result for various types."""
 
     def test_serialize_none(self):
-        result = self.executor._serialize_tool_result(None)
+        result = serialize_tool_result(None)
         self.assertEqual(json.loads(result), {"result": None})
 
     def test_serialize_string(self):
-        result = self.executor._serialize_tool_result("hello")
+        result = serialize_tool_result("hello")
         self.assertEqual(result, "hello")
 
     def test_serialize_dict(self):
         d = {"key": "value", "num": 42}
-        result = self.executor._serialize_tool_result(d)
+        result = serialize_tool_result(d)
         self.assertEqual(json.loads(result), d)
 
     def test_serialize_list(self):
         lst = [1, 2, 3]
-        result = self.executor._serialize_tool_result(lst)
+        result = serialize_tool_result(lst)
         self.assertEqual(json.loads(result), lst)
 
     def test_serialize_dataclass(self):
@@ -384,7 +375,7 @@ class TestSerializeToolResult(unittest.TestCase):
             name: str = "test"
             value: int = 42
 
-        result = self.executor._serialize_tool_result(Sample())
+        result = serialize_tool_result(Sample())
         parsed = json.loads(result)
         self.assertEqual(parsed["name"], "test")
         self.assertEqual(parsed["value"], 42)

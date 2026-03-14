@@ -95,6 +95,8 @@ LITELLM_FALLBACK_MODELS=openai/gpt-4o-mini,anthropic/claude-3-5-sonnet
 
 本项目完全放开了 LiteLLM 原生能力，支持高并发、自动重试、按 RPM/TPM 负载均衡等操作。
 
+### 本地运行 / Docker 部署模式配置说明
+
 1. 在 `.env` 中只保留一行指向声明：
    ```env
    LITELLM_CONFIG=./litellm_config.yaml
@@ -110,6 +112,22 @@ model_list:
       api_base: https://api.deepseek.com/v1
       api_key: "os.environ/MY_CUSTOM_SECRET_KEY"  # 从环境变量读取 Key，安全防泄漏
 ```
+
+### GitHub Actions配置说明
+
+1. `Settings` → `Secrets and variables` → `Actions` → `Secret`标签页下的`New repository secret` 或者 `Variables`标签页下的`New repository variable`
+
+2. 按下表配置，只有全部必填配置正确配置，YAML 高级配置模式才可以生效，YAML配置文件的写法，可以参考自带的 `litellm_config.example.yaml`
+
+| Secret 名称 | 说明 | 必填 |
+|------------|------|:----:|
+| `LITELLM_CONFIG` | 配置文件路径，通常配置`./litellm_config.yaml` | 必填 |
+| `LITELLM_MODEL` | 模型名称 | 必填 |
+| `LITELLM_CONFIG_YAML` | 存放YAML配置文件，可以不用在存储库中提交文件 | 可选 |
+| `LITELLM_API_KEY` | 用于存储API Key，可在配置文件中引用（环境变量引用方式）。由于GitHub Actions必须要指定导入的环境变量，因此你不能像本地运行模式那样自由命名环境变量 | 可选，必须配置到repository secret中 |
+| `ANTHROPIC_API_KEY` | 如果要多个API Key，这个变量名称也能拿来用 | 可选，必须配置到repository secret中 |
+| `OPENAI_API_KEY` | 同上，可以用来存储API Key | 可选，必须配置到repository secret中 |
+
 
 > **三层配置互斥准则**：YAML 优先级最高！只要配置了 YAML，**渠道模式** 和 **新手极简模式** 统统被忽略。系统优先级为：`YAML配置 > 渠道模式 > 极简单模型`。
 

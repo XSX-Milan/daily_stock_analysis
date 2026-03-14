@@ -1,8 +1,18 @@
 import { useState } from 'react';
 import type React from 'react';
 import { EyeToggleIcon, Select } from '../common';
-import type { ConfigValidationIssue, SystemConfigItem } from '../../types/systemConfig';
+import type { ConfigValidationIssue, SystemConfigFieldSchema, SystemConfigItem } from '../../types/systemConfig';
 import { getFieldDescriptionZh, getFieldTitleZh } from '../../utils/systemConfigI18n';
+
+function normalizeSelectOptions(options: SystemConfigFieldSchema['options'] = []) {
+  return options.map((option) => {
+    if (typeof option === 'string') {
+      return { value: option, label: option };
+    }
+
+    return option;
+  });
+}
 
 function isMultiValueField(item: SystemConfigItem): boolean {
   const validation = (item.schema?.validation ?? {}) as Record<string, unknown>;
@@ -61,7 +71,7 @@ function renderFieldControl(
         <Select
           value={value}
           onChange={onChange}
-          options={schema.options.map((option) => ({ value: option, label: option }))}
+          options={normalizeSelectOptions(schema.options)}
           disabled={disabled || !schema.isEditable}
           placeholder="请选择"
         />

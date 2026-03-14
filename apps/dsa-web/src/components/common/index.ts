@@ -10,3 +10,4 @@ export * from './JsonViewer';
 export * from './Select';
 export * from './Badge';
 export * from './Pagination';
+export * from './ConfirmDialog';

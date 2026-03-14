@@ -7,6 +7,7 @@ interface DrawerProps {
   title?: string;
   children: React.ReactNode;
   width?: string;
+  zIndex?: number;
 }
 
 /**
@@ -18,6 +19,7 @@ export const Drawer: React.FC<DrawerProps> = ({
   title,
   children,
   width = 'max-w-2xl',
+  zIndex = 50,
 }) => {
   // ESC 键关闭
   const handleKeyDown = useCallback(
@@ -43,7 +45,7 @@ export const Drawer: React.FC<DrawerProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden">
+    <div className="fixed inset-0 overflow-hidden" style={{ zIndex }}>
       {/* 遮罩层 */}
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm transition-opacity duration-300"

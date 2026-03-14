@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { agentApi } from '../api/agent';
-import { ApiErrorAlert } from '../components/common';
+import { ApiErrorAlert, ConfirmDialog } from '../components/common';
 import { getParsedApiError } from '../api/error';
 import type { StrategyInfo } from '../api/agent';
 import { historyApi } from '../api/history';
@@ -153,7 +153,7 @@ const ChatPage: React.FC = () => {
       const payload = {
         message: msgText,
         session_id: sessionId,
-        skills: usedStrategy ? [usedStrategy] : undefined,
+        strategies: usedStrategy ? [usedStrategy] : undefined,
         context: followUpContextRef.current ?? undefined,
       };
       followUpContextRef.current = null;
@@ -372,36 +372,16 @@ const ChatPage: React.FC = () => {
       )}
 
       {/* Delete confirmation dialog */}
-      {deleteConfirmId && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => setDeleteConfirmId(null)}
-        >
-          <div
-            className="bg-elevated border border-white/10 rounded-xl p-6 max-w-sm mx-4 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-white font-medium mb-2">删除对话</h3>
-            <p className="text-sm text-secondary mb-5">
-              删除后，该对话将不可恢复，确认删除吗？
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setDeleteConfirmId(null)}
-                className="px-4 py-1.5 rounded-lg text-sm text-secondary hover:text-white hover:bg-white/5 border border-white/10 transition-colors"
-              >
-                取消
-              </button>
-              <button
-                onClick={confirmDelete}
-                className="px-4 py-1.5 rounded-lg text-sm text-white bg-red-500/80 hover:bg-red-500 transition-colors"
-              >
-                删除
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        isOpen={!!deleteConfirmId}
+        title="删除对话"
+        message="删除后，该对话将不可恢复，确认删除吗？"
+        confirmText="确认删除"
+        cancelText="取消"
+        isDanger={true}
+        onConfirm={confirmDelete}
+        onCancel={() => setDeleteConfirmId(null)}
+      />
 
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">

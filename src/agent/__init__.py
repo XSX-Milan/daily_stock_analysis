@@ -34,9 +34,6 @@ def __getattr__(name):
     if name == "AgentOrchestrator":
         from src.agent.orchestrator import AgentOrchestrator
         return AgentOrchestrator
-    if name == "ResearchAgent":
-        from src.agent.research import ResearchAgent
-        return ResearchAgent
     if name == "AgentMemory":
         from src.agent.memory import AgentMemory
         return AgentMemory
@@ -52,6 +49,5 @@ __all__ = [
     "StageResult",
     "AgentRunStats",
     "AgentOrchestrator",
-    "ResearchAgent",
     "AgentMemory",
 ]

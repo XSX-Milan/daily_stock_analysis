@@ -22,7 +22,7 @@ from json_repair import repair_json
 from litellm import Router
 
 from src.agent.llm_adapter import get_thinking_extra_body
-from src.config import Config, get_config, get_api_keys_for_model, extra_litellm_params
+from src.config import Config, get_config, get_api_keys_for_model, extra_litellm_params, get_configured_llm_models
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
 from src.schemas.report_schema import AnalysisReportSchema
@@ -176,6 +176,60 @@ def fill_chip_structure_if_needed(result: "AnalysisResult", chip_data: Any) -> N
             logger.info("[chip_structure] Filled placeholder chip fields from data source (Issue #589)")
     except Exception as e:
         logger.warning("[chip_structure] Fill failed, skipping: %s", e)
+
+
+_PRICE_POS_KEYS = ("ma5", "ma10", "ma20", "bias_ma5", "bias_status", "current_price", "support_level", "resistance_level")
+
+
+def fill_price_position_if_needed(
+    result: "AnalysisResult",
+    trend_result: Any = None,
+    realtime_quote: Any = None,
+) -> None:
+    """Fill missing price_position fields from trend_result / realtime data (in-place)."""
+    if not result:
+        return
+    try:
+        if not result.dashboard:
+            result.dashboard = {}
+        dash = result.dashboard
+        dp = dash.get("data_perspective") or {}
+        dash["data_perspective"] = dp
+        pp = dp.get("price_position") or {}
+
+        computed: Dict[str, Any] = {}
+        if trend_result:
+            tr = trend_result if isinstance(trend_result, dict) else (
+                trend_result.__dict__ if hasattr(trend_result, "__dict__") else {}
+            )
+            computed["ma5"] = tr.get("ma5")
+            computed["ma10"] = tr.get("ma10")
+            computed["ma20"] = tr.get("ma20")
+            computed["bias_ma5"] = tr.get("bias_ma5")
+            computed["current_price"] = tr.get("current_price")
+            support_levels = tr.get("support_levels") or []
+            resistance_levels = tr.get("resistance_levels") or []
+            if support_levels:
+                computed["support_level"] = support_levels[0]
+            if resistance_levels:
+                computed["resistance_level"] = resistance_levels[0]
+        if realtime_quote:
+            rq = realtime_quote if isinstance(realtime_quote, dict) else (
+                realtime_quote.to_dict() if hasattr(realtime_quote, "to_dict") else {}
+            )
+            if _is_value_placeholder(computed.get("current_price")):
+                computed["current_price"] = rq.get("price")
+
+        filled = False
+        for k in _PRICE_POS_KEYS:
+            if _is_value_placeholder(pp.get(k)) and not _is_value_placeholder(computed.get(k)):
+                pp[k] = computed[k]
+                filled = True
+        if filled:
+            dp["price_position"] = pp
+            logger.info("[price_position] Filled placeholder fields from computed data")
+    except Exception as e:
+        logger.warning("[price_position] Fill failed, skipping: %s", e)
 
 
 def get_stock_name_multi_source(
@@ -751,14 +805,17 @@ class GeminiAnalyzer:
                 if extra:
                     call_kwargs["extra_body"] = extra
 
-                if use_channel_router and self._router:
+                _router_model_names = set(get_configured_llm_models(config.llm_model_list))
+                if use_channel_router and self._router and model in _router_model_names:
                     # Channel / YAML path: Router manages key + base_url per model
                     response = self._router.completion(**call_kwargs)
-                elif self._router and model == config.litellm_model:
+                elif self._router and model == config.litellm_model and not use_channel_router:
                     # Legacy path: Router only for primary model multi-key
                     response = self._router.completion(**call_kwargs)
                 else:
-                    # Legacy path: direct call for fallback models
+                    # Legacy/direct-env path: direct call (also handles direct-env
+                    # providers like groq/ or bedrock/ that are not in the Router
+                    # model_list even when channel mode is active)
                     keys = get_api_keys_for_model(model, config)
                     if keys:
                         call_kwargs["api_key"] = keys[0]
@@ -891,7 +948,7 @@ class GeminiAnalyzer:
 
             # 设置生成配置
             generation_config = {
-                "temperature": config.gemini_temperature,
+                "temperature": config.llm_temperature,
                 "max_output_tokens": 8192,
             }
 

@@ -28,7 +28,7 @@ def _make_config(**kwargs) -> Config:
         stock_list=["600519"],
         tushare_token=None,
         # Populate llm_model_list as the three-tier signal
-        llm_model_list=[{"model_name": "gemini/gemini-2.0-flash", "litellm_params": {"api_key": "sk-test"}}],
+        llm_model_list=[{"model_name": "gemini/gemini-2.0-flash", "litellm_params": {"model": "gemini/gemini-2.0-flash", "api_key": "sk-test"}}],
         litellm_model="gemini/gemini-2.0-flash",
         gemini_api_keys=[],
         anthropic_api_keys=[],
@@ -146,6 +146,7 @@ class TestValidateStructuredLLM:
         ]
         cfg = _make_config(
             llm_model_list=channel_model_list,
+            litellm_model="openai/gpt-4o-mini",
             gemini_api_keys=[],
             anthropic_api_keys=[],
             openai_api_keys=[],
@@ -161,6 +162,7 @@ class TestValidateStructuredLLM:
         ]
         cfg = _make_config(
             llm_model_list=yaml_model_list,
+            litellm_model="gemini/gemini-2.5-flash",
             litellm_config_path="/tmp/litellm.yaml",
             gemini_api_keys=[],
             anthropic_api_keys=[],
@@ -200,6 +202,35 @@ class TestValidateStructuredLLM:
         llm_issues = [i for i in issues if "LITELLM_MODEL" in i.field]
         assert llm_issues, "Expected an info issue about LITELLM_MODEL"
         assert all(i.severity == "info" for i in llm_issues)
+
+    def test_direct_env_provider_model_without_model_list_no_error(self):
+        """Direct LiteLLM env providers should count as configured for runtime."""
+        cfg = _make_config(
+            llm_model_list=[],
+            litellm_model="cohere/command-r-plus",
+        )
+        issues = cfg.validate_structured()
+        assert not any(i.severity == "error" and "LLM" in i.message for i in issues)
+
+    def test_configured_primary_model_missing_from_channels_is_error(self):
+        cfg = _make_config(
+            llm_model_list=[
+                {"model_name": "openai/gpt-4o-mini", "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": "sk-test"}},
+            ],
+            litellm_model="openai/gpt-4o",
+        )
+        issues = cfg.validate_structured()
+        assert any(i.severity == "error" and i.field == "LITELLM_MODEL" for i in issues)
+
+    def test_configured_vision_model_missing_from_channels_is_warning(self):
+        cfg = _make_config(
+            llm_model_list=[
+                {"model_name": "openai/gpt-4o-mini", "litellm_params": {"model": "openai/gpt-4o-mini", "api_key": "sk-test"}},
+            ],
+            vision_model="openai/gpt-4o",
+        )
+        issues = cfg.validate_structured()
+        assert any(i.severity == "warning" and i.field == "VISION_MODEL" for i in issues)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +338,10 @@ class TestVisionKeyValidation:
     def test_primary_provider_key_sufficient_even_if_not_in_priority(self):
         """Primary model's provider key is checked even when absent from VISION_PROVIDER_PRIORITY."""
         cfg = _make_config(
+            llm_model_list=[
+                {"model_name": "openai/gpt-4o", "litellm_params": {"model": "openai/gpt-4o", "api_key": "sk-test"}},
+            ],
+            litellm_model="openai/gpt-4o",
             vision_model="openai/gpt-4o",
             vision_provider_priority="gemini,anthropic",  # openai excluded from priority
             openai_api_keys=["sk-openai-validkey-xyz"],

@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ApiErrorAlert } from '../components/common';
+import { ApiErrorAlert, ConfirmDialog } from '../components/common';
 import { getParsedApiError } from '../api/error';
 import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
 import { historyApi } from '../api/history';
@@ -9,14 +9,14 @@ import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { validateStockCode } from '../utils/validation';
 import { getRecentStartDate, getTodayInShanghai } from '../utils/format';
 import { useAnalysisStore } from '../stores/analysisStore';
-import { ReportSummary } from '../components/report';
+import { ReportSummary, ReportMarkdown } from '../components/report';
 import { HistoryList } from '../components/history';
 import { TaskPanel } from '../components/tasks';
 import { useTaskStream } from '../hooks';
 
 /**
- * 首页 - 单页设计
- * 顶部输入 + 左侧历史 + 右侧报告
+ * Home Page - Single Page Design
+ * Top input + Left history + Right report
  */
 const HomePage: React.FC = () => {
   const {
@@ -26,32 +26,38 @@ const HomePage: React.FC = () => {
   } = useAnalysisStore();
   const navigate = useNavigate();
 
-  // 输入状态
+  // Input state
   const [stockCode, setStockCode] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [inputError, setInputError] = useState<string>();
 
-// 历史列表状态
+// History list state
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<number[]>([]);
+  const [isDeletingHistory, setIsDeletingHistory] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 20;
 
-  // 报告详情状态
+  // Report detail state
   const [selectedReport, setSelectedReport] = useState<AnalysisReport | null>(null);
   const [isLoadingReport, setIsLoadingReport] = useState(false);
 
-  // 任务队列状态
+  // Task queue state
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
   const [duplicateError, setDuplicateError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // 用于跟踪当前分析请求，避免竞态条件
+  // Markdown report drawer state
+  const [showMarkdownDrawer, setShowMarkdownDrawer] = useState(false);
+
+  // Used to track the current analysis request to avoid race conditions
   const analysisRequestIdRef = useRef<number>(0);
 
-  // 更新任务列表中的任务
+  // Update task in task list
   const updateTask = useCallback((updatedTask: TaskInfo) => {
     setActiveTasks((prev) => {
       const index = prev.findIndex((t) => t.taskId === updatedTask.taskId);
@@ -64,41 +70,41 @@ const HomePage: React.FC = () => {
     });
   }, []);
 
-  // 移除已完成/失败的任务
+  // Remove completed/failed tasks
   const removeTask = useCallback((taskId: string) => {
     setActiveTasks((prev) => prev.filter((t) => t.taskId !== taskId));
   }, []);
 
-  // SSE 任务流
+  // SSE Task Stream
   useTaskStream({
     onTaskCreated: (task) => {
       setActiveTasks((prev) => {
-        // 避免重复添加
+        // Avoid duplicate addition
         if (prev.some((t) => t.taskId === task.taskId)) return prev;
         return [...prev, task];
       });
     },
     onTaskStarted: updateTask,
     onTaskCompleted: (task) => {
-      // 刷新历史列表
+      // Refresh history list
       fetchHistory();
-      // 延迟移除任务，让用户看到完成状态
+      // Delay removal of task so user can see completion status
       setTimeout(() => removeTask(task.taskId), 2000);
     },
     onTaskFailed: (task) => {
       updateTask(task);
-      // 显示错误提示
+      // Show error prompt
       setStoreError(getParsedApiError(task.error || '分析失败'));
-      // 延迟移除任务
+      // Delay removal of task
       setTimeout(() => removeTask(task.taskId), 5000);
     },
     onError: () => {
-      console.warn('SSE 连接断开，正在重连...');
+      console.warn('SSE connection disconnected, reconnecting...');
     },
     enabled: true,
   });
 
-// 用 ref 追踪易变状态，避免 fetchHistory 频繁重建导致 effect 循环
+// Use refs to track mutable state, avoiding frequent re-builds of fetchHistory that cause effect loops
   const currentPageRef = useRef(currentPage);
   currentPageRef.current = currentPage;
   const historyItemsRef = useRef(historyItems);
@@ -106,7 +112,12 @@ const HomePage: React.FC = () => {
   const selectedReportRef = useRef(selectedReport);
   selectedReportRef.current = selectedReport;
 
-  // 加载历史列表
+  useEffect(() => {
+    const visibleIds = new Set(historyItems.map((item) => item.id));
+    setSelectedHistoryIds((prev) => prev.filter((id) => visibleIds.has(id)));
+  }, [historyItems]);
+
+  // Load history list
   const fetchHistory = useCallback(async (autoSelectFirst = false, reset = true, silent = false) => {
     if (!silent) {
       if (reset) {
@@ -130,7 +141,8 @@ const HomePage: React.FC = () => {
       });
 
       if (silent && reset) {
-        // 后台刷新：合并新增项到列表顶部，保留已加载的分页数据和滚动位置
+        // Background refresh: merge new items to the top of the list, 
+        // preserving loaded pagination data and scroll position.
         setHistoryItems(prev => {
           const existingIds = new Set(prev.map(item => item.id));
           const newItems = response.items.filter(item => !existingIds.has(item.id));
@@ -144,13 +156,13 @@ const HomePage: React.FC = () => {
         setCurrentPage(page);
       }
 
-      // 判断是否还有更多数据
+      // Determine if there is more data
       if (!silent) {
         const totalLoaded = reset ? response.items.length : historyItemsRef.current.length + response.items.length;
         setHasMore(totalLoaded < response.total);
       }
 
-      // 如果需要自动选择第一条，且有数据，且当前没有选中报告
+      // If auto-select first is needed, data exists, and no report is currently selected
       if (autoSelectFirst && response.items.length > 0 && !selectedReportRef.current) {
         const firstItem = response.items[0];
         setIsLoadingReport(true);
@@ -174,14 +186,97 @@ const HomePage: React.FC = () => {
     }
   }, [pageSize, setStoreError]);
 
-  // 加载更多历史记录
+  // Load more history records
   const handleLoadMore = useCallback(() => {
     if (!isLoadingMore && hasMore) {
       fetchHistory(false, false);
     }
   }, [fetchHistory, isLoadingMore, hasMore]);
 
-  // 初始加载 - 自动选择第一条（仅挂载时执行一次）
+  const handleToggleHistorySelection = useCallback((recordId: number) => {
+    setSelectedHistoryIds((prev) => (
+      prev.includes(recordId)
+        ? prev.filter((id) => id !== recordId)
+        : [...prev, recordId]
+    ));
+  }, []);
+
+  const handleToggleSelectAllHistory = useCallback(() => {
+    const visibleIds = historyItemsRef.current.map((item) => item.id);
+    setSelectedHistoryIds((prev) => {
+      const visibleSet = new Set(visibleIds);
+      const allSelected = visibleIds.length > 0 && visibleIds.every((id) => prev.includes(id));
+      if (allSelected) {
+        return prev.filter((id) => !visibleSet.has(id));
+      }
+      return Array.from(new Set([...prev, ...visibleIds]));
+    });
+  }, []);
+
+  const handleDeleteSelectedHistory = useCallback(async () => {
+    const recordIds = Array.from(new Set(selectedHistoryIds));
+    if (recordIds.length === 0 || isDeletingHistory) {
+      return;
+    }
+
+    setIsDeletingHistory(true);
+    try {
+      await historyApi.deleteRecords(recordIds);
+      const deletedIds = new Set(recordIds);
+      const selectedWasDeleted = selectedReportRef.current?.meta.id !== undefined
+        && deletedIds.has(selectedReportRef.current.meta.id);
+
+      // Clear selection immediately for responsive UI feedback.
+      setSelectedHistoryIds([]);
+
+      // Re-fetch page 1 to reset the pagination cursor (currentPage) and hasMore
+      // so subsequent onLoadMore calls use the correct server-side offset after
+      // the deletion shifted remaining records upward.
+      // We also fetch fresh page-1 data directly here so we can read the new
+      // first item without depending on historyItemsRef (which only updates on
+      // the next render, after React flushes the state from fetchHistory).
+      const [freshPage] = await Promise.all([
+        selectedWasDeleted
+          ? historyApi.getList({
+              startDate: getRecentStartDate(30),
+              endDate: getTodayInShanghai(),
+              page: 1,
+              limit: pageSize,
+            })
+          : Promise.resolve(null),
+        fetchHistory(false, true),
+      ]);
+
+      if (selectedWasDeleted) {
+        const nextItem = freshPage?.items?.[0] ?? null;
+        if (nextItem) {
+          try {
+            const report = await historyApi.getDetail(nextItem.id);
+            setStoreError(null);
+            setSelectedReport(report);
+          } catch (err) {
+            console.error('Failed to fetch replacement report:', err);
+            setStoreError(getParsedApiError(err));
+            setSelectedReport(null);
+          }
+        } else {
+          setSelectedReport(null);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to delete history:', err);
+      setStoreError(getParsedApiError(err));
+    } finally {
+      setIsDeletingHistory(false);
+      setShowDeleteConfirm(false);
+    }
+  }, [fetchHistory, isDeletingHistory, pageSize, selectedHistoryIds, setStoreError]);
+
+  const confirmDeleteHistory = useCallback(() => {
+    setShowDeleteConfirm(true);
+  }, []);
+
+  // Initial load - auto select first item (executes once on mount)
   useEffect(() => {
     fetchHistory(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -208,7 +303,7 @@ const HomePage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 点击历史项加载报告
+  // Click history item to load report
   const handleHistoryClick = async (recordId: number) => {
     // Increment request ID to cancel any in-flight auto-select result.
     const requestId = ++analysisRequestIdRef.current;
@@ -229,7 +324,7 @@ const HomePage: React.FC = () => {
     }
   };
 
-  // 分析股票（异步模式）
+  // Analyze stock (async mode)
   const handleAnalyze = async () => {
     const { valid, message, normalized } = validateStockCode(stockCode);
     if (!valid) {
@@ -243,28 +338,28 @@ const HomePage: React.FC = () => {
     setLoading(true);
     setStoreError(null);
 
-    // 记录当前请求的 ID
+    // Track current request ID
     const currentRequestId = ++analysisRequestIdRef.current;
 
     try {
-      // 使用异步模式提交分析
+      // Submit analysis using async mode
       const response = await analysisApi.analyzeAsync({
         stockCode: normalized,
         reportType: 'detailed',
       });
 
-      // 清空输入框
+      // Clear input box
       if (currentRequestId === analysisRequestIdRef.current) {
         setStockCode('');
       }
 
-      // 任务已提交，SSE 会推送更新
+      // Task submitted, SSE will push updates
       console.log('Task submitted:', response.taskId);
     } catch (err) {
       console.error('Analysis failed:', err);
       if (currentRequestId === analysisRequestIdRef.current) {
         if (err instanceof DuplicateTaskError) {
-          // 显示重复任务错误
+          // Show duplicate task error
           setDuplicateError(`股票 ${err.stockCode} 正在分析中，请等待完成`);
         } else {
           setStoreError(getParsedApiError(err));
@@ -276,7 +371,7 @@ const HomePage: React.FC = () => {
     }
   };
 
-  // 回车提交
+  // Submit on Enter key
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && stockCode && !isAnalyzing) {
       handleAnalyze();
@@ -292,8 +387,13 @@ const HomePage: React.FC = () => {
         isLoadingMore={isLoadingMore}
         hasMore={hasMore}
         selectedId={selectedReport?.meta.id}
+        selectedIds={new Set(selectedHistoryIds)}
+        isDeleting={isDeletingHistory}
         onItemClick={(id) => { handleHistoryClick(id); setSidebarOpen(false); }}
         onLoadMore={handleLoadMore}
+        onToggleItemSelection={handleToggleHistorySelection}
+        onToggleSelectAll={handleToggleSelectAllHistory}
+        onDeleteSelected={confirmDeleteHistory}
         className="max-h-[62vh] md:max-h-[62vh] flex-1 overflow-hidden"
       />
     </div>
@@ -304,7 +404,7 @@ const HomePage: React.FC = () => {
       className="min-h-screen flex flex-col md:grid overflow-hidden w-full"
       style={{ gridTemplateColumns: 'minmax(12px, 1fr) 256px 24px minmax(auto, 896px) minmax(12px, 1fr)', gridTemplateRows: 'auto 1fr' }}
     >
-      {/* 顶部输入栏 */}
+      {/* Top Input Bar */}
       <header
         className="md:col-start-2 md:col-end-5 md:row-start-1 py-3 px-3 md:px-0 border-b border-white/5 flex-shrink-0 flex items-center min-w-0 overflow-hidden"
       >
@@ -378,7 +478,7 @@ const HomePage: React.FC = () => {
         </div>
       )}
 
-      {/* 右侧报告详情 */}
+      {/* Right Report Detail */}
       <section className="md:col-start-4 md:row-start-2 flex-1 overflow-y-auto overflow-x-auto px-3 md:px-0 md:pl-1 min-w-0 min-h-0">
         {analysisError ? (
           <ApiErrorAlert
@@ -393,8 +493,8 @@ const HomePage: React.FC = () => {
           </div>
         ) : selectedReport ? (
           <div className="max-w-4xl">
-            {/* Follow-up button */}
-            <div className="flex items-center justify-end mb-2">
+            {/* Action buttons */}
+            <div className="flex items-center justify-end mb-2 gap-2">
               <button
                 disabled={selectedReport.meta.id === undefined}
                 onClick={() => {
@@ -409,6 +509,16 @@ const HomePage: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
                 追问 AI
+              </button>
+              <button
+                disabled={selectedReport.meta.id === undefined}
+                onClick={() => setShowMarkdownDrawer(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple/10 border border-purple/20 text-purple text-sm hover:bg-purple/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                详细报告
               </button>
             </div>
             <ReportSummary data={selectedReport} isHistory />
@@ -427,6 +537,32 @@ const HomePage: React.FC = () => {
           </div>
         )}
       </section>
+
+      {/* Markdown Report Drawer */}
+      {showMarkdownDrawer && selectedReport && selectedReport.meta.id && (
+        <ReportMarkdown
+          recordId={selectedReport.meta.id}
+          stockName={selectedReport.meta.stockName || ''}
+          stockCode={selectedReport.meta.stockCode}
+          onClose={() => setShowMarkdownDrawer(false)}
+        />
+      )}
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showDeleteConfirm}
+        title="删除历史记录"
+        message={
+          selectedHistoryIds.length === 1
+            ? '确认删除这条历史记录吗？删除后将不可恢复。'
+            : `确认删除选中的 ${selectedHistoryIds.length} 条历史记录吗？删除后将不可恢复。`
+        }
+        confirmText={isDeletingHistory ? '删除中...' : '确认删除'}
+        cancelText="取消"
+        isDanger={true}
+        onConfirm={handleDeleteSelectedHistory}
+        onCancel={() => setShowDeleteConfirm(false)}
+      />
     </div>
   );
 };

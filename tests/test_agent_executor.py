@@ -258,7 +258,68 @@ class TestAgentExecutor(unittest.TestCase):
         result = executor.run("Test unknown tool")
 
         self.assertTrue(result.success)
+        self.assertEqual(len(result.tool_calls_log), 1)
         self.assertFalse(result.tool_calls_log[0]["success"])
+        self.assertFalse(result.tool_calls_log[0]["cached"])
+
+    def test_non_retriable_tool_failure_is_cached_across_hk_variants(self):
+        """Equivalent HK code variants should not re-execute a non-retriable failing tool."""
+        calls = []
+
+        def _quote(stock_code):
+            calls.append(stock_code)
+            return {
+                "error": f"No realtime quote available for {stock_code}",
+                "retriable": False,
+                "note": "Skip retry",
+            }
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="get_realtime_quote",
+                description="Get realtime quote",
+                parameters=[
+                    ToolParameter(name="stock_code", type="string", description="Stock code"),
+                ],
+                handler=_quote,
+            )
+        )
+        adapter = _make_mock_adapter()
+
+        adapter.call_with_tools.side_effect = [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="q1", name="get_realtime_quote", arguments={"stock_code": "hk01810"}),
+                ],
+                usage={"total_tokens": 10},
+                provider="openai",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="q2", name="get_realtime_quote", arguments={"stock_code": "1810.HK"}),
+                ],
+                usage={"total_tokens": 10},
+                provider="openai",
+            ),
+            LLMResponse(
+                content=json.dumps(SAMPLE_DASHBOARD, ensure_ascii=False),
+                tool_calls=[],
+                usage={"total_tokens": 10},
+                provider="openai",
+            ),
+        ]
+
+        executor = AgentExecutor(registry, adapter, max_steps=5)
+        result = executor.run("Analyze HK01810")
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls, ["hk01810"])
+        self.assertEqual(len(result.tool_calls_log), 2)
+        self.assertFalse(result.tool_calls_log[0]["cached"])
+        self.assertTrue(result.tool_calls_log[1]["cached"])
 
     def test_model_trace_deduplicates_and_keeps_order(self):
         """Model trace should keep call order and de-duplicate repeated models."""

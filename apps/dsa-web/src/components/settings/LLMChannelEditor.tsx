@@ -161,10 +161,6 @@ interface LLMChannelEditorProps {
   disabled?: boolean;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Compact channel row with expandable detail                        */
-/* ------------------------------------------------------------------ */
-
 interface ChannelRowProps {
   channel: ChannelConfig;
   index: number;
@@ -198,63 +194,68 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
   const hasKey = channel.apiKey.length > 0;
 
   return (
-    <div className="rounded-lg border border-white/8 bg-card/40 overflow-hidden">
-      {/* Summary row — always visible */}
+    <div className="overflow-hidden rounded-lg border border-white/8 bg-card/40">
       <div
-        className="flex items-center gap-2 px-3 py-2 cursor-pointer select-none hover:bg-white/[0.03] transition-colors"
+        className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 transition-colors hover:bg-white/[0.03]"
         onClick={() => onToggleExpand(index)}
-        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleExpand(index); } }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggleExpand(index);
+          }
+        }}
         role="button"
         tabIndex={0}
       >
-        <span className="text-[11px] text-muted w-4 shrink-0">{expanded ? '▼' : '▶'}</span>
+        <span className="w-4 shrink-0 text-[11px] text-muted-text">{expanded ? '▼' : '▶'}</span>
 
         <input
           type="checkbox"
           checked={channel.enabled}
           disabled={busy}
-          className="shrink-0"
+          className="h-4 w-4 shrink-0 rounded border-white/10 bg-card text-cyan focus:ring-cyan/20"
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => onUpdate(index, 'enabled', e.target.checked)}
         />
 
-        <span className="min-w-[100px] truncate text-sm text-white font-medium">{displayName}</span>
+        <span className="min-w-[100px] truncate text-sm font-medium text-white">{displayName}</span>
 
-        <span className="hidden sm:inline rounded bg-white/8 px-1.5 py-0.5 text-[10px] text-muted uppercase tracking-wide">
+        <span className="hidden rounded bg-white/8 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-text sm:inline">
           {channel.protocol}
         </span>
 
-        <span className="text-[11px] text-muted truncate flex-1">
+        <span className="flex-1 truncate text-[11px] text-muted-text">
           {modelCount > 0 ? `${modelCount} 个模型` : '未配置模型'}
         </span>
 
-        {/* Status indicators */}
-        <span className="flex items-center gap-1.5 shrink-0">
-          {testState?.status === 'success' && <span className="h-2 w-2 rounded-full bg-emerald-400" title="连接正常" />}
-          {testState?.status === 'error' && <span className="h-2 w-2 rounded-full bg-rose-400" title="连接失败" />}
-          {testState?.status === 'loading' && <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" title="测试中" />}
-          {!hasKey && channel.protocol !== 'ollama' && (
+        <span className="flex shrink-0 items-center gap-1.5">
+          {testState?.status === 'success' ? <span className="h-2 w-2 rounded-full bg-emerald-400" title="连接正常" /> : null}
+          {testState?.status === 'error' ? <span className="h-2 w-2 rounded-full bg-rose-400" title="连接失败" /> : null}
+          {testState?.status === 'loading' ? <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" title="测试中" /> : null}
+          {!hasKey && channel.protocol !== 'ollama' ? (
             <span className="text-[10px] text-amber-400/80">未填 Key</span>
-          )}
+          ) : null}
         </span>
 
         <button
           type="button"
-          className="shrink-0 text-xs text-muted hover:text-rose-300 transition-colors px-1"
+          className="shrink-0 px-1 text-xs text-muted-text transition-colors hover:text-rose-300"
           disabled={busy}
-          onClick={(e) => { e.stopPropagation(); onRemove(index); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove(index);
+          }}
           title="删除渠道"
         >
           ✕
         </button>
       </div>
 
-      {/* Detail panel — only when expanded */}
-      {expanded && (
-        <div className="border-t border-white/6 bg-card/20 px-3 py-3 space-y-2.5">
+      {expanded ? (
+        <div className="space-y-2.5 border-t border-white/6 bg-card/20 px-3 py-3">
           <div className="grid gap-2 sm:grid-cols-2">
             <div>
-              <label className="mb-0.5 block text-[11px] text-muted">渠道名称</label>
+              <label className="mb-0.5 block text-[11px] text-muted-text">渠道名称</label>
               <input
                 className="input-terminal text-sm"
                 value={channel.name}
@@ -264,7 +265,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
               />
             </div>
             <div>
-              <label className="mb-0.5 block text-[11px] text-muted">协议</label>
+              <label className="mb-0.5 block text-[11px] text-muted-text">协议</label>
               <Select
                 value={channel.protocol}
                 onChange={(v) => onUpdate(index, 'protocol', normalizeProtocol(v))}
@@ -276,7 +277,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
           </div>
 
           <div>
-            <label className="mb-0.5 block text-[11px] text-muted">Base URL</label>
+            <label className="mb-0.5 block text-[11px] text-muted-text">Base URL</label>
             <input
               className="input-terminal text-sm"
               value={channel.baseUrl}
@@ -291,11 +292,11 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
           </div>
 
           <div>
-            <label className="mb-0.5 block text-[11px] text-muted">API Key</label>
+            <label className="mb-0.5 block text-[11px] text-muted-text">API Key</label>
             <div className="flex items-center gap-1.5">
               <input
                 type={visibleKey ? 'text' : 'password'}
-                className="input-terminal text-sm flex-1"
+                className="input-terminal flex-1 text-sm"
                 value={channel.apiKey}
                 disabled={busy}
                 onChange={(e) => onUpdate(index, 'apiKey', e.target.value)}
@@ -315,7 +316,7 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
           </div>
 
           <div>
-            <label className="mb-0.5 block text-[11px] text-muted">模型（逗号分隔）</label>
+            <label className="mb-0.5 block text-[11px] text-muted-text">模型（逗号分隔）</label>
             <input
               className="input-terminal text-sm"
               value={channel.models}
@@ -334,18 +335,21 @@ const ChannelRow: React.FC<ChannelRowProps> = ({
             >
               {testState?.status === 'loading' ? '测试中...' : '测试连接'}
             </button>
-            {testState?.text && (
+            {testState?.text ? (
               <span className={`text-xs ${
-                testState.status === 'success' ? 'text-emerald-300'
-                : testState.status === 'error' ? 'text-rose-300'
-                : 'text-muted'
-              }`}>
+                testState.status === 'success'
+                  ? 'text-emerald-300'
+                  : testState.status === 'error'
+                    ? 'text-rose-300'
+                    : 'text-muted-text'
+              }`}
+              >
                 {testState.text}
               </span>
-            )}
+            ) : null}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 };
@@ -394,7 +398,7 @@ function inferProtocol(protocol: string, baseUrl: string, models: string[]): Cha
     return 'openai';
   }
 
-  return baseUrl.trim() ? 'openai' : 'openai';
+  return 'openai';
 }
 
 function parseEnabled(value: string | undefined): boolean {
@@ -431,7 +435,6 @@ function normalizeModelForRuntime(model: string, protocol: ChannelProtocol): str
     const lowerPrefix = rawPrefix.toLowerCase();
     const canonicalPrefix = PROTOCOL_ALIASES[lowerPrefix] || lowerPrefix;
     if (KNOWN_MODEL_PREFIXES.has(lowerPrefix) || KNOWN_MODEL_PREFIXES.has(canonicalPrefix)) {
-      // Known provider — canonicalize the prefix if it's an alias
       if (canonicalPrefix !== lowerPrefix && KNOWN_MODEL_PREFIXES.has(canonicalPrefix)) {
         return `${canonicalPrefix}/${trimmedModel.split('/').slice(1).join('/')}`;
       }
@@ -466,21 +469,20 @@ function usesDirectEnvProvider(model: string): boolean {
   return Boolean(provider) && !MANAGED_PROVIDERS.has(provider);
 }
 
-/** Mirror of backend resolve_unified_llm_temperature: prefers provider-specific env for the active model. */
 function resolveTemperatureFromItems(itemMap: Map<string, string>): string {
   const unified = itemMap.get('LLM_TEMPERATURE');
   if (unified) return unified;
 
   const primaryModel = itemMap.get('LITELLM_MODEL') || '';
   const provider = primaryModel.includes('/') ? primaryModel.split('/')[0] : (primaryModel ? 'openai' : '');
-  const PROVIDER_TEMPERATURE_ENV: Record<string, string> = {
+  const providerTemperatureEnv: Record<string, string> = {
     gemini: 'GEMINI_TEMPERATURE',
     vertex_ai: 'GEMINI_TEMPERATURE',
     anthropic: 'ANTHROPIC_TEMPERATURE',
     openai: 'OPENAI_TEMPERATURE',
     deepseek: 'OPENAI_TEMPERATURE',
   };
-  const preferredEnv = PROVIDER_TEMPERATURE_ENV[provider];
+  const preferredEnv = providerTemperatureEnv[provider];
   if (preferredEnv) {
     const val = itemMap.get(preferredEnv);
     if (val) return val;
@@ -602,8 +604,6 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
   );
   const managesRuntimeConfig = !hasLitellmConfig;
 
-  // Stable fingerprints to avoid resetting editor state when unrelated fields
-  // (e.g. LITELLM_CONFIG) in the same category are edited by the user.
   const channelsFingerprint = useMemo(() => JSON.stringify(initialChannels), [initialChannels]);
   const runtimeFingerprint = useMemo(() => JSON.stringify(initialRuntimeConfig), [initialRuntimeConfig]);
 
@@ -682,12 +682,10 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
       if (rowIndex !== index) return channel;
       const updated = { ...channel, [field]: value };
 
-      // Auto-apply preset when name exactly matches a known provider
       if (field === 'name' && typeof value === 'string') {
         const newPreset = CHANNEL_PRESETS[value];
         if (newPreset) {
           const oldPreset = CHANNEL_PRESETS[channel.name];
-          // Only auto-fill if value is empty or still from a previous preset
           if (!updated.baseUrl || updated.baseUrl === (oldPreset?.baseUrl ?? '')) {
             updated.baseUrl = newPreset.baseUrl;
           }
@@ -753,9 +751,6 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
       return;
     }
 
-    // Only validate model references against channel-derived models when
-    // channels actually define models.  Users relying on LITELLM_CONFIG
-    // or legacy API Key env vars may have models not visible here.
     if (managesRuntimeConfig && availableModels.length > 0) {
       const invalidPrimaryModel = runtimeConfig.primaryModel
         && !availableModels.includes(runtimeConfig.primaryModel)
@@ -875,16 +870,15 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
       >
         <div>
           <h3 className="text-sm font-semibold text-white">AI 模型配置</h3>
-          <p className="mt-0.5 text-xs text-muted">
+          <p className="mt-0.5 text-xs text-muted-text">
             添加服务商渠道，填入 API Key 和模型名称即可。配置会自动同步到 .env 文件。
           </p>
         </div>
-        <span className="text-xs text-muted">{isCollapsed ? '▶ 展开' : '▼ 收起'}</span>
+        <span className="text-xs text-muted-text">{isCollapsed ? '▶ 展开' : '▼ 收起'}</span>
       </button>
 
-      {!isCollapsed && (
+      {!isCollapsed ? (
         <div className="mt-4 space-y-5">
-          {/* --- Add Channel --- */}
           <div className="flex items-center gap-2">
             <button type="button" className="btn-secondary whitespace-nowrap" disabled={busy} onClick={addChannel}>
               + 添加渠道
@@ -902,48 +896,47 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
             />
           </div>
 
-          {/* --- Channel List --- */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between px-1">
-              <span className="text-xs font-medium text-muted uppercase tracking-wider">渠道列表</span>
-              {channels.length > 0 && (
-                <span className="text-[10px] text-muted">{channels.filter(c => c.enabled).length}/{channels.length} 已启用</span>
-              )}
+              <span className="text-xs font-medium uppercase tracking-wider text-muted-text">渠道列表</span>
+              {channels.length > 0 ? (
+                <span className="text-[10px] text-muted-text">{channels.filter((c) => c.enabled).length}/{channels.length} 已启用</span>
+              ) : null}
             </div>
 
-          {channels.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-white/10 bg-card/20 px-4 py-6 text-center text-xs text-muted">
-              还没有渠道，选择服务商后点击「添加渠道」
-            </div>
-          ) : channels.map((channel, index) => (
-            <ChannelRow
-              key={index}
-              channel={channel}
-              index={index}
-              busy={busy}
-              visibleKey={Boolean(visibleKeys[index])}
-              expanded={Boolean(expandedRows[index])}
-              testState={testStates[index]}
-              onUpdate={updateChannel}
-              onRemove={removeChannel}
-              onToggleExpand={toggleExpand}
-              onToggleKeyVisibility={toggleKeyVisibility}
-              onTest={(ch, idx) => void handleTest(ch, idx)}
-            />
-          ))}
+            {channels.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-white/10 bg-card/20 px-4 py-6 text-center text-xs text-muted-text">
+                还没有渠道，选择服务商后点击「添加渠道」
+              </div>
+            ) : channels.map((channel, index) => (
+              <ChannelRow
+                key={index}
+                channel={channel}
+                index={index}
+                busy={busy}
+                visibleKey={Boolean(visibleKeys[index])}
+                expanded={Boolean(expandedRows[index])}
+                testState={testStates[index]}
+                onUpdate={updateChannel}
+                onRemove={removeChannel}
+                onToggleExpand={toggleExpand}
+                onToggleKeyVisibility={toggleKeyVisibility}
+                onTest={(ch, idx) => void handleTest(ch, idx)}
+              />
+            ))}
           </div>
 
           {managesRuntimeConfig ? (
             <div className="rounded-lg border border-white/8 bg-card/30 p-3">
               <div className="mb-3 flex items-center justify-between">
                 <div>
-                  <span className="text-xs font-medium text-muted uppercase tracking-wider">运行时参数</span>
-                  <p className="mt-0.5 text-[11px] text-secondary">留空时自动推断</p>
+                  <span className="text-xs font-medium uppercase tracking-wider text-muted-text">运行时参数</span>
+                  <p className="mt-0.5 text-[11px] text-secondary-text">留空时自动推断</p>
                 </div>
               </div>
 
               <div className="mb-4">
-                <label className="mb-1 block text-xs text-muted">Temperature</label>
+                <label className="mb-1 block text-xs text-muted-text">Temperature</label>
                 <div className="flex items-center gap-3">
                   <input
                     type="range"
@@ -955,21 +948,21 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                     onChange={(event) => setRuntimeConfig((previous) => ({ ...previous, temperature: event.target.value }))}
                     className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/10 accent-cyan"
                   />
-                  <span className="w-8 text-right text-sm text-secondary">{runtimeConfig.temperature}</span>
+                  <span className="w-8 text-right text-sm text-secondary-text">{runtimeConfig.temperature}</span>
                 </div>
-                <p className="mt-1 text-[11px] text-secondary">
+                <p className="mt-1 text-[11px] text-secondary-text">
                   控制模型输出随机性，0 为确定性输出，2 为最大随机性，推荐 0.7。
                 </p>
               </div>
 
               {availableModels.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-white/10 bg-card/20 px-3 py-2 text-xs text-muted">
+                <div className="rounded-lg border border-dashed border-white/10 bg-card/20 px-3 py-2 text-xs text-muted-text">
                   先添加至少一个已启用渠道并填写模型，下面的主模型 / fallback / Vision 选项才会出现。
                 </div>
               ) : (
                 <div className="space-y-4">
                   <div>
-                    <label className="mb-1 block text-xs text-muted">主模型</label>
+                    <label className="mb-1 block text-xs text-muted-text">主模型</label>
                     <Select
                       value={runtimeConfig.primaryModel}
                       onChange={setPrimaryModel}
@@ -980,10 +973,10 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                   </div>
 
                   <div>
-                    <label className="mb-2 block text-xs text-muted">Fallback 模型</label>
+                    <label className="mb-2 block text-xs text-muted-text">Fallback 模型</label>
                     <div className="space-y-2 rounded-lg border border-white/8 bg-card/20 p-3">
                       {availableModels.map((model) => (
-                        <label key={model} className="flex items-center gap-2 text-sm text-secondary">
+                        <label key={model} className="flex items-center gap-2 text-sm text-secondary-text">
                           <input
                             type="checkbox"
                             checked={runtimeConfig.fallbackModels.includes(model)}
@@ -994,13 +987,13 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
                         </label>
                       ))}
                     </div>
-                    <p className="mt-1 text-[11px] text-secondary">
+                    <p className="mt-1 text-[11px] text-secondary-text">
                       Fallback 只会在主模型失败时使用。主模型不会重复加入 fallback。
                     </p>
                   </div>
 
                   <div>
-                    <label className="mb-1 block text-xs text-muted">Vision 模型</label>
+                    <label className="mb-1 block text-xs text-muted-text">Vision 模型</label>
                     <Select
                       value={runtimeConfig.visionModel}
                       onChange={(value) => setRuntimeConfig((previous) => ({ ...previous, visionModel: value }))}
@@ -1028,9 +1021,7 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
             >
               {isSaving ? '保存中...' : managesRuntimeConfig ? '保存 AI 配置' : '保存渠道配置'}
             </button>
-            {!hasChanges ? (
-              <span className="text-xs text-muted">当前没有未保存的改动</span>
-            ) : null}
+            {!hasChanges ? <span className="text-xs text-muted-text">当前没有未保存的改动</span> : null}
           </div>
 
           {saveMessage?.type === 'success' ? (
@@ -1045,11 +1036,9 @@ export const LLMChannelEditor: React.FC<LLMChannelEditorProps> = ({
             </div>
           ) : null}
 
-          {saveMessage?.type === 'error' ? (
-            <ApiErrorAlert error={saveMessage.error} />
-          ) : null}
+          {saveMessage?.type === 'error' ? <ApiErrorAlert error={saveMessage.error} /> : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 };

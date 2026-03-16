@@ -18,6 +18,7 @@ from api.v1.schemas.analysis import (
     AnalyzeRequest,
     AnalysisResultResponse,
     TaskAccepted,
+    BatchTaskAcceptedResponse,
     TaskStatus,
 )
 from api.v1.schemas.history import (
@@ -62,6 +63,32 @@ from api.v1.schemas.system_config import (
     SystemConfigValidationErrorResponse,
     SystemConfigConflictResponse,
 )
+from api.v1.schemas.portfolio import (
+    PortfolioAccountCreateRequest,
+    PortfolioAccountUpdateRequest,
+    PortfolioAccountItem,
+    PortfolioAccountListResponse,
+    PortfolioTradeCreateRequest,
+    PortfolioCashLedgerCreateRequest,
+    PortfolioCorporateActionCreateRequest,
+    PortfolioEventCreatedResponse,
+    PortfolioTradeListItem,
+    PortfolioTradeListResponse,
+    PortfolioCashLedgerListItem,
+    PortfolioCashLedgerListResponse,
+    PortfolioCorporateActionListItem,
+    PortfolioCorporateActionListResponse,
+    PortfolioPositionItem,
+    PortfolioAccountSnapshot,
+    PortfolioSnapshotResponse,
+    PortfolioImportTradeItem,
+    PortfolioImportParseResponse,
+    PortfolioImportCommitResponse,
+    PortfolioImportBrokerItem,
+    PortfolioImportBrokerListResponse,
+    PortfolioFxRefreshResponse,
+    PortfolioRiskResponse,
+)
 
 __all__ = [
     # common
@@ -73,6 +100,7 @@ __all__ = [
     "AnalyzeRequest",
     "AnalysisResultResponse",
     "TaskAccepted",
+    "BatchTaskAcceptedResponse",
     "TaskStatus",
     # history
     "HistoryItem",
@@ -112,4 +140,29 @@ __all__ = [
     "TestLLMChannelResponse",
     "SystemConfigValidationErrorResponse",
     "SystemConfigConflictResponse",
+    # portfolio
+    "PortfolioAccountCreateRequest",
+    "PortfolioAccountUpdateRequest",
+    "PortfolioAccountItem",
+    "PortfolioAccountListResponse",
+    "PortfolioTradeCreateRequest",
+    "PortfolioCashLedgerCreateRequest",
+    "PortfolioCorporateActionCreateRequest",
+    "PortfolioEventCreatedResponse",
+    "PortfolioTradeListItem",
+    "PortfolioTradeListResponse",
+    "PortfolioCashLedgerListItem",
+    "PortfolioCashLedgerListResponse",
+    "PortfolioCorporateActionListItem",
+    "PortfolioCorporateActionListResponse",
+    "PortfolioPositionItem",
+    "PortfolioAccountSnapshot",
+    "PortfolioSnapshotResponse",
+    "PortfolioImportTradeItem",
+    "PortfolioImportParseResponse",
+    "PortfolioImportCommitResponse",
+    "PortfolioImportBrokerItem",
+    "PortfolioImportBrokerListResponse",
+    "PortfolioFxRefreshResponse",
+    "PortfolioRiskResponse",
 ]

@@ -48,7 +48,7 @@ const LoginPage: React.FC = () => {
         <h1 className="mb-2 text-xl font-semibold text-white">
           {isFirstTime ? '设置初始密码' : '管理员登录'}
         </h1>
-        <p className="mb-6 text-sm text-secondary">
+        <p className="mb-6 text-sm text-secondary-text">
           {isFirstTime
             ? '请设置管理员密码，输入两遍确认'
             : '请输入密码以继续访问'}
@@ -56,7 +56,7 @@ const LoginPage: React.FC = () => {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label htmlFor="password" className="mb-1 block text-sm font-medium text-secondary">
+            <label htmlFor="password" className="mb-1 block text-sm font-medium text-secondary-text">
               {isFirstTime ? '新密码' : '密码'}
             </label>
             <input
@@ -76,7 +76,7 @@ const LoginPage: React.FC = () => {
             <div>
               <label
                 htmlFor="passwordConfirm"
-                className="mb-1 block text-sm font-medium text-secondary"
+                className="mb-1 block text-sm font-medium text-secondary-text"
               >
                 确认密码
               </label>

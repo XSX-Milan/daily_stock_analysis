@@ -576,7 +576,7 @@ def main() -> int:
     if args.serve_only:
         logger.info("模式: 仅 Web 服务")
         logger.info(f"Web 服务运行中: http://{args.host}:{args.port}")
-        logger.info("通过 /api/v1/analysis/stock/{code} 接口触发分析")
+        logger.info("通过 /api/v1/analysis/analyze 接口触发分析")
         logger.info(f"API 文档: http://{args.host}:{args.port}/docs")
         logger.info("按 Ctrl+C 退出...")
         try:

@@ -39,10 +39,10 @@ jobs:
         run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
       
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       
       - name: 设置 Python 环境
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -244,7 +244,7 @@ jobs:
           fi
       
       - name: 上传分析报告
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: analysis-reports-${{ github.run_number }}

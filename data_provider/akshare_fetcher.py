@@ -125,7 +125,10 @@ def _is_hk_code(stock_code: str) -> bool:
         True 表示是港股代码，False 表示不是港股代码
     """
     # 去除可能的 'hk' 前缀并检查是否为纯数字
-    code = stock_code.lower()
+    code = stock_code.strip().lower()
+    if code.endswith('.hk'):
+        numeric_part = code[:-3]
+        return numeric_part.isdigit() and 1 <= len(numeric_part) <= 5
     if code.startswith('hk'):
         # 带 hk 前缀的一定是港股，去掉前缀后应为纯数字（1-5位）
         numeric_part = code[2:]
@@ -791,14 +794,8 @@ class AkshareFetcher(BaseFetcher):
         Returns:
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
-        # 检查熔断器状态
         circuit_breaker = get_realtime_circuit_breaker()
-        source_key = f"akshare_{source}"
-        
-        if not circuit_breaker.is_available(source_key):
-            logger.warning(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
-            return None
-        
+
         # 根据代码类型选择不同的获取方法
         if _is_us_code(stock_code):
             # 美股不使用 Akshare，由 YfinanceFetcher 处理
@@ -807,8 +804,16 @@ class AkshareFetcher(BaseFetcher):
         elif _is_hk_code(stock_code):
             return self._get_hk_realtime_quote(stock_code)
         elif _is_etf_code(stock_code):
+            source_key = "akshare_etf"
+            if not circuit_breaker.is_available(source_key):
+                logger.warning(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
+                return None
             return self._get_etf_realtime_quote(stock_code)
         else:
+            source_key = f"akshare_{source}"
+            if not circuit_breaker.is_available(source_key):
+                logger.warning(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
+                return None
             # 普通 A 股：根据 source 选择数据源
             if source == "sina":
                 return self._get_stock_realtime_quote_sina(stock_code)
@@ -1335,6 +1340,10 @@ class AkshareFetcher(BaseFetcher):
         import akshare as ak
         circuit_breaker = get_realtime_circuit_breaker()
         source_key = "akshare_hk"
+
+        if not circuit_breaker.is_available(source_key):
+            logger.warning(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
+            return None
         
         try:
             # 防封禁策略
@@ -1342,7 +1351,12 @@ class AkshareFetcher(BaseFetcher):
             self._enforce_rate_limit()
             
             # 确保代码格式正确（5位数字）
-            code = stock_code.lower().replace('hk', '').zfill(5)
+            raw_code = stock_code.strip().lower()
+            if raw_code.endswith('.hk'):
+                raw_code = raw_code[:-3]
+            if raw_code.startswith('hk'):
+                raw_code = raw_code[2:]
+            code = raw_code.zfill(5)
             
             logger.info(f"[API调用] ak.stock_hk_spot_em() 获取港股实时行情...")
             import time as _time
@@ -1413,6 +1427,11 @@ class AkshareFetcher(BaseFetcher):
         # 美股没有筹码分布数据（Akshare 不支持）
         if _is_us_code(stock_code):
             logger.debug(f"[API跳过] {stock_code} 是美股，无筹码分布数据")
+            return None
+
+        # 港股没有筹码分布数据（stock_cyq_em 是 A 股专属接口）
+        if _is_hk_code(stock_code):
+            logger.debug(f"[API跳过] {stock_code} 是港股，无筹码分布数据")
             return None
 
         # ETF/指数没有筹码分布数据

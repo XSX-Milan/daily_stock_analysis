@@ -354,7 +354,11 @@ const HomePage: React.FC = () => {
       }
 
       // Task submitted, SSE will push updates
-      console.log('Task submitted:', response.taskId);
+      if ('taskId' in response) {
+        console.log('Task submitted:', response.taskId);
+      } else {
+        console.log('Batch tasks submitted:', response.accepted.map((task) => task.taskId));
+      }
     } catch (err) {
       console.error('Analysis failed:', err);
       if (currentRequestId === analysisRequestIdRef.current) {
@@ -394,7 +398,7 @@ const HomePage: React.FC = () => {
         onToggleItemSelection={handleToggleHistorySelection}
         onToggleSelectAll={handleToggleSelectAllHistory}
         onDeleteSelected={confirmDeleteHistory}
-        className="max-h-[62vh] md:max-h-[62vh] flex-1 overflow-hidden"
+        className="max-h-[80vh] md:max-h-[80vh] flex-1 overflow-hidden"
       />
     </div>
   );
@@ -412,7 +416,7 @@ const HomePage: React.FC = () => {
           {/* Mobile hamburger */}
           <button
             onClick={() => setSidebarOpen(true)}
-            className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-white/10 transition-colors text-secondary hover:text-white flex-shrink-0"
+            className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-white/10 transition-colors text-secondary-text hover:text-white flex-shrink-0"
             title="历史记录"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -489,7 +493,7 @@ const HomePage: React.FC = () => {
         {isLoadingReport ? (
           <div className="flex flex-col items-center justify-center h-full">
             <div className="w-10 h-10 border-3 border-cyan/20 border-t-cyan rounded-full animate-spin" />
-            <p className="mt-3 text-secondary text-sm">加载报告中...</p>
+            <p className="mt-3 text-secondary-text text-sm">加载报告中...</p>
           </div>
         ) : selectedReport ? (
           <div className="max-w-4xl">
@@ -526,12 +530,12 @@ const HomePage: React.FC = () => {
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <div className="w-12 h-12 mb-3 rounded-xl bg-elevated flex items-center justify-center">
-              <svg className="w-6 h-6 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 text-muted-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
               </svg>
             </div>
             <h3 className="text-base font-medium text-white mb-1.5">开始分析</h3>
-            <p className="text-xs text-muted max-w-xs">
+            <p className="text-xs text-muted-text max-w-xs">
               输入股票代码进行分析，或从左侧选择历史报告查看
             </p>
           </div>

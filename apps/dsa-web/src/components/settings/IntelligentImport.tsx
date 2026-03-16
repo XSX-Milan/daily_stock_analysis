@@ -272,7 +272,7 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
   return (
     <div className="rounded-xl border border-white/8 bg-elevated/40 p-4">
       <p className="mb-2 text-sm font-medium text-white">智能导入</p>
-      <p className="mb-3 text-xs text-muted">
+      <p className="mb-3 text-xs text-muted-text">
         支持图片、CSV/Excel 文件、剪贴板粘贴。图片需配置 Vision API。建议人工核对后再合并。
       </p>
 
@@ -297,7 +297,7 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
         <div className="flex gap-2">
           <textarea
             placeholder="或粘贴 CSV/Excel 复制的文本..."
-            className="min-h-[60px] w-full rounded-lg border border-white/16 bg-card/60 px-2 py-1.5 text-sm text-white placeholder:text-muted"
+            className="min-h-[60px] w-full rounded-lg border border-white/16 bg-card/60 px-2 py-1.5 text-sm text-white placeholder:text-muted-text"
             value={pasteText}
             onChange={(e) => setPasteText(e.target.value)}
             disabled={disabled || isLoading}
@@ -308,7 +308,7 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
         </div>
       </div>
 
-      {isLoading && <p className="mb-2 text-sm text-secondary">处理中...</p>}
+      {isLoading && <p className="mb-2 text-sm text-secondary-text">处理中...</p>}
       {error && (
         <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">{error}</div>
       )}
@@ -319,17 +319,17 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
             ⚠️ 建议人工逐条核对后再合并。高置信度默认勾选，中/低需手动勾选。
           </p>
           <div className="flex items-center justify-between">
-            <span className="text-xs text-secondary">
+            <span className="text-xs text-secondary-text">
               共 {validCount} 条可合并，已勾选 {checkedCount} 条
             </span>
             <div className="flex gap-2">
-              <button type="button" className="text-xs text-muted hover:text-white" onClick={() => toggleAll(true)}>
+              <button type="button" className="text-xs text-muted-text hover:text-white" onClick={() => toggleAll(true)}>
                 全选
               </button>
-              <button type="button" className="text-xs text-muted hover:text-white" onClick={() => toggleAll(false)}>
+              <button type="button" className="text-xs text-muted-text hover:text-white" onClick={() => toggleAll(false)}>
                 取消
               </button>
-              <button type="button" className="text-xs text-muted hover:text-white" onClick={clearAll}>
+              <button type="button" className="text-xs text-muted-text hover:text-white" onClick={clearAll}>
                 清空
               </button>
             </div>
@@ -352,13 +352,13 @@ export const IntelligentImport: React.FC<IntelligentImportProps> = ({
                 <span className={it.code ? 'text-white' : 'text-red-400'}>
                   {it.code || '解析失败'}
                 </span>
-                {it.name && <span className="text-muted">({it.name})</span>}
-                <span className="ml-auto text-xs text-muted">
+                {it.name && <span className="text-muted-text">({it.name})</span>}
+                <span className="ml-auto text-xs text-muted-text">
                   {it.confidence === 'high' ? '高' : it.confidence === 'low' ? '低' : '中'}
                 </span>
                 <button
                   type="button"
-                  className="text-muted hover:text-white"
+                  className="text-muted-text hover:text-white"
                   onClick={() => removeItem(it.id)}
                   disabled={disabled}
                 >

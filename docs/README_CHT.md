@@ -95,7 +95,7 @@
 | `TELEGRAM_MESSAGE_THREAD_ID` | Telegram Topic ID (用於發送到子話題) | 可選 |
 | `DISCORD_WEBHOOK_URL` | Discord Webhook URL | 可選 |
 | `DISCORD_BOT_TOKEN` | Discord Bot Token（與 Webhook 二選一） | 可選 |
-| `DISCORD_CHANNEL_ID` | Discord Channel ID（使用 Bot 時需要） | 可選 |
+| `DISCORD_MAIN_CHANNEL_ID` | Discord Channel ID（使用 Bot 時需要） | 可選 |
 | `EMAIL_SENDER` | 發件人郵箱（如 `xxx@qq.com`） | 可選 |
 | `EMAIL_PASSWORD` | 郵箱授權碼（非登錄密碼） | 可選 |
 | `EMAIL_RECEIVERS` | 收件人郵箱（多個用逗號分隔，留空則發給自己） | 可選 |
@@ -223,6 +223,8 @@
 | `/api/v1/agent/strategies` | GET | 取得可用策略清單（內建/自訂） |
 | `/api/v1/agent/chat/stream` | POST (SSE) | Agent 多輪策略對話（流式） |
 | `/api/health` | GET | 健康檢查 |
+
+> 備註：`POST /api/v1/analysis/analyze` 在 `async_mode=false` 時僅支援單一股票；批量 `stock_codes` 需使用 `async_mode=true`。異步 `202` 對單股回傳 `task_id`，對批量回傳 `accepted` / `duplicates` 匯總。
 
 ## 項目結構
 

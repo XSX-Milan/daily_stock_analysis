@@ -76,6 +76,7 @@ def normalize_stock_code(stock_code: str) -> str:
     - '000001.SZ'   -> '000001'   (strip .SZ suffix)
     - '920748.BJ'   -> '920748'   (strip .BJ suffix, BSE)
     - 'HK00700'     -> 'HK00700'  (keep HK prefix for HK stocks)
+    - '1810.HK'     -> 'HK01810'  (normalize HK suffix to canonical prefix form)
     - 'AAPL'        -> 'AAPL'     (keep US stock ticker as-is)
 
     This function is applied at the DataProviderManager layer so that
@@ -83,6 +84,12 @@ def normalize_stock_code(stock_code: str) -> str:
     """
     code = stock_code.strip()
     upper = code.upper()
+
+    # Normalize HK prefix to a canonical 5-digit form (e.g. hk1810 -> HK01810)
+    if upper.startswith('HK') and not upper.startswith('HK.'):
+        candidate = upper[2:]
+        if candidate.isdigit() and 1 <= len(candidate) <= 5:
+            return f"HK{candidate.zfill(5)}"
 
     # Strip SH/SZ prefix (e.g. SH600519 -> 600519)
     if upper.startswith(('SH', 'SZ')) and not upper.startswith('SH.') and not upper.startswith('SZ.'):
@@ -100,6 +107,8 @@ def normalize_stock_code(stock_code: str) -> str:
     # Strip .SH/.SZ/.BJ suffix (e.g. 600519.SH -> 600519, 920748.BJ -> 920748)
     if '.' in code:
         base, suffix = code.rsplit('.', 1)
+        if suffix.upper() == 'HK' and base.isdigit() and 1 <= len(base) <= 5:
+            return f"HK{base.zfill(5)}"
         if suffix.upper() in ('SH', 'SZ', 'SS', 'BJ') and base.isdigit():
             return base
 
@@ -124,8 +133,12 @@ def _is_hk_market(code: str) -> bool:
     支持 `HK00700` 及纯 5 位数字形式（A 股 ETF/股票常见为 6 位）。
     """
     normalized = (code or "").strip().upper()
+    if normalized.endswith(".HK"):
+        base = normalized[:-3]
+        return base.isdigit() and 1 <= len(base) <= 5
     if normalized.startswith("HK"):
-        return True
+        digits = normalized[2:]
+        return digits.isdigit() and 1 <= len(digits) <= 5
     if normalized.isdigit() and len(normalized) == 5:
         return True
     return False
@@ -917,7 +930,6 @@ class DataFetcherManager:
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
 
-        from .realtime_types import get_realtime_circuit_breaker
         from .akshare_fetcher import _is_us_code
         from .us_index_mapping import is_us_index_code
         from src.config import get_config
@@ -959,6 +971,26 @@ class DataFetcherManager:
                             logger.warning(f"[实时行情] 美股 {stock_code} 获取失败: {e}")
                     break
             logger.warning(f"[实时行情] 美股 {stock_code} 无可用数据源")
+            return None
+
+        # 港股实时行情只走港股专用入口，避免按 A 股 source_priority
+        # 反复触发同一个 ak.stock_hk_spot_em() 接口。
+        if _is_hk_market(stock_code):
+            for fetcher in self._fetchers:
+                if fetcher.name != "AkshareFetcher":
+                    continue
+                if not hasattr(fetcher, 'get_realtime_quote'):
+                    break
+                try:
+                    quote = fetcher.get_realtime_quote(stock_code, source="hk")
+                    if quote is not None and quote.has_basic_data():
+                        logger.info(f"[实时行情] 港股 {stock_code} 成功获取 (来源: akshare_hk)")
+                        return quote
+                except Exception as e:
+                    logger.warning(f"[实时行情] 港股 {stock_code} 获取失败: {e}")
+                break
+
+            logger.warning(f"[实时行情] 港股 {stock_code} 无可用数据源")
             return None
         
         # 获取配置的数据源优先级

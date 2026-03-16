@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { agentApi } from '../api/agent';
-import { ApiErrorAlert, ConfirmDialog } from '../components/common';
+import { ApiErrorAlert, Button } from '../components/common';
 import { getParsedApiError } from '../api/error';
 import type { StrategyInfo } from '../api/agent';
 import { historyApi } from '../api/history';
@@ -211,7 +211,7 @@ const ChatPage: React.FC = () => {
     return (
       <button
         onClick={() => toggleThinking(msg.id)}
-        className="flex items-center gap-2 text-xs text-muted hover:text-secondary transition-colors mb-2 w-full text-left"
+        className="flex items-center gap-2 text-xs text-muted-text hover:text-secondary-text transition-colors mb-2 w-full text-left"
       >
         <svg
           className={`w-3 h-3 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-90' : ''}`}
@@ -228,7 +228,7 @@ const ChatPage: React.FC = () => {
         </svg>
         <span className="flex items-center gap-1.5">
           <span className="opacity-60">思考过程</span>
-          <span className="text-muted/50">·</span>
+          <span className="text-muted-text/50">·</span>
           <span className="opacity-50">{summary}</span>
         </span>
       </button>
@@ -240,15 +240,15 @@ const ChatPage: React.FC = () => {
       {steps.map((step, idx) => {
         let icon = '⋯';
         let text = '';
-        let colorClass = 'text-muted';
+        let colorClass = 'text-muted-text';
         if (step.type === 'thinking') {
           icon = '🤔';
           text = step.message || `第 ${step.step} 步：思考`;
-          colorClass = 'text-secondary';
+          colorClass = 'text-secondary-text';
         } else if (step.type === 'tool_start') {
           icon = '⚙️';
           text = `${step.display_name || step.tool}...`;
-          colorClass = 'text-secondary';
+          colorClass = 'text-secondary-text';
         } else if (step.type === 'tool_done') {
           icon = step.success ? '✅' : '❌';
           text = `${step.display_name || step.tool} (${step.duration}s)`;
@@ -277,7 +277,7 @@ const ChatPage: React.FC = () => {
         <span className="text-sm font-medium text-white">历史对话</span>
         <button
           onClick={handleStartNewChat}
-          className="p-1.5 rounded-lg hover:bg-white/10 transition-colors text-secondary hover:text-white"
+          className="p-1.5 rounded-lg hover:bg-white/10 transition-colors text-secondary-text hover:text-white"
           title="新对话"
         >
           <svg
@@ -297,9 +297,9 @@ const ChatPage: React.FC = () => {
       </div>
       <div className="flex-1 overflow-y-auto custom-scrollbar">
         {sessionsLoading ? (
-          <div className="p-4 text-center text-xs text-muted">加载中...</div>
+          <div className="p-4 text-center text-xs text-muted-text">加载中...</div>
         ) : sessions.length === 0 ? (
-          <div className="p-4 text-center text-xs text-muted">暂无历史对话</div>
+          <div className="p-4 text-center text-xs text-muted-text">暂无历史对话</div>
         ) : (
           sessions.map((s) => (
             <button
@@ -310,7 +310,7 @@ const ChatPage: React.FC = () => {
               }`}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="text-sm text-secondary group-hover:text-white truncate flex-1">
+                <span className="text-sm text-secondary-text group-hover:text-white truncate flex-1">
                   {s.title}
                 </span>
                 <button
@@ -318,7 +318,7 @@ const ChatPage: React.FC = () => {
                     e.stopPropagation();
                     setDeleteConfirmId(s.session_id);
                   }}
-                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-white/10 text-muted hover:text-red-400 transition-all flex-shrink-0"
+                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-white/10 text-muted-text hover:text-red-400 transition-all flex-shrink-0"
                   title="删除"
                 >
                   <svg
@@ -336,7 +336,7 @@ const ChatPage: React.FC = () => {
                   </svg>
                 </button>
               </div>
-              <div className="text-xs text-muted mt-0.5">
+              <div className="text-xs text-muted-text mt-0.5">
                 {s.message_count} 条消息
                 {s.last_active &&
                   ` · ${new Date(s.last_active).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`}
@@ -372,16 +372,36 @@ const ChatPage: React.FC = () => {
       )}
 
       {/* Delete confirmation dialog */}
-      <ConfirmDialog
-        isOpen={!!deleteConfirmId}
-        title="删除对话"
-        message="删除后，该对话将不可恢复，确认删除吗？"
-        confirmText="确认删除"
-        cancelText="取消"
-        isDanger={true}
-        onConfirm={confirmDelete}
-        onCancel={() => setDeleteConfirmId(null)}
-      />
+      {deleteConfirmId && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => setDeleteConfirmId(null)}
+        >
+          <div
+            className="bg-elevated border border-white/10 rounded-xl p-6 max-w-sm mx-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-white font-medium mb-2">删除对话</h3>
+            <p className="text-sm text-secondary-text mb-5">
+              删除后，该对话将不可恢复，确认删除吗？
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="px-4 py-1.5 rounded-lg text-sm text-secondary-text hover:text-white hover:bg-white/5 border border-white/10 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="px-4 py-1.5 rounded-lg text-sm text-white bg-red-500/80 hover:bg-red-500 transition-colors"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main chat area */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -389,7 +409,7 @@ const ChatPage: React.FC = () => {
           <h1 className="text-2xl font-bold text-white mb-2 flex items-center gap-2">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-white/10 transition-colors text-secondary hover:text-white"
+              className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-white/10 transition-colors text-secondary-text hover:text-white"
               title="历史对话"
             >
               <svg
@@ -421,7 +441,7 @@ const ChatPage: React.FC = () => {
             </svg>
             问股
           </h1>
-          <p className="text-secondary text-sm">
+          <p className="text-secondary-text text-sm">
             向 AI 询问个股分析，获取基于策略的交易建议与实时决策报告。
           </p>
           {messages.length > 0 && (
@@ -429,7 +449,7 @@ const ChatPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => downloadSession(messages)}
-                className="px-3 py-1.5 rounded-lg text-sm text-secondary hover:text-white hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-1.5"
+                className="px-3 py-1.5 rounded-lg text-sm text-secondary-text hover:text-white hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-1.5"
                 title="导出会话为 Markdown 文件"
               >
                 <svg
@@ -470,7 +490,7 @@ const ChatPage: React.FC = () => {
                   }
                 }}
                 disabled={sending}
-                className="px-3 py-1.5 rounded-lg text-sm text-secondary hover:text-white hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-3 py-1.5 rounded-lg text-sm text-secondary-text hover:text-white hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="发送到已配置的通知机器人/邮箱"
               >
                 {sending ? (
@@ -528,7 +548,7 @@ const ChatPage: React.FC = () => {
               <div className="h-full flex flex-col items-center justify-center text-center">
                 <div className="w-16 h-16 mb-4 rounded-2xl bg-white/5 flex items-center justify-center">
                   <svg
-                    className="w-8 h-8 text-muted"
+                    className="w-8 h-8 text-muted-text"
                     fill="none"
                     stroke="currentColor"
                     viewBox="0 0 24 24"
@@ -544,7 +564,7 @@ const ChatPage: React.FC = () => {
                 <h3 className="text-lg font-medium text-white mb-2">
                   开始问股
                 </h3>
-                <p className="text-sm text-secondary max-w-sm mb-6">
+                <p className="text-sm text-secondary-text max-w-sm mb-6">
                   输入「分析 600519」或「茅台现在能买吗」，AI
                   将调用实时数据工具为您生成决策报告。
                 </p>
@@ -553,7 +573,7 @@ const ChatPage: React.FC = () => {
                     <button
                       key={i}
                       onClick={() => handleQuickQuestion(q)}
-                      className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-sm text-secondary hover:text-white hover:border-cyan/40 hover:bg-cyan/5 transition-all"
+                      className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-sm text-secondary-text hover:text-white hover:border-cyan/40 hover:bg-cyan/5 transition-all"
                     >
                       {q.label}
                     </button>
@@ -579,7 +599,7 @@ const ChatPage: React.FC = () => {
                     className={`max-w-[80%] rounded-2xl px-5 py-3.5 ${
                       msg.role === 'user'
                         ? 'bg-cyan/10 text-white border border-cyan/20 rounded-tr-sm'
-                        : 'bg-white/5 text-secondary border border-white/10 rounded-tl-sm'
+                        : 'bg-white/5 text-secondary-text border border-white/10 rounded-tl-sm'
                     }`}
                   >
                     {msg.role === 'assistant' && msg.strategyName && (
@@ -622,7 +642,7 @@ const ChatPage: React.FC = () => {
                       prose-td:border-white/10 prose-td:px-3 prose-td:py-1.5
                       prose-hr:border-white/10 prose-hr:my-3
                       prose-a:text-cyan prose-a:no-underline hover:prose-a:underline
-                      prose-blockquote:border-cyan/30 prose-blockquote:text-secondary
+                      prose-blockquote:border-cyan/30 prose-blockquote:text-secondary-text
                     "
                       >
                         <Markdown remarkPlugins={[remarkGfm]}>
@@ -652,12 +672,12 @@ const ChatPage: React.FC = () => {
                   AI
                 </div>
                 <div className="bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm px-5 py-4 min-w-[200px] max-w-[80%]">
-                  <div className="flex items-center gap-2.5 text-sm text-secondary">
+                  <div className="flex items-center gap-2.5 text-sm text-secondary-text">
                     <div className="relative w-4 h-4 flex-shrink-0">
                       <div className="absolute inset-0 rounded-full border-2 border-cyan/20" />
                       <div className="absolute inset-0 rounded-full border-2 border-cyan border-t-transparent animate-spin" />
                     </div>
-                    <span className="text-secondary">
+                    <span className="text-secondary-text">
                       {getCurrentStage(progressSteps)}
                     </span>
                   </div>
@@ -675,7 +695,7 @@ const ChatPage: React.FC = () => {
             ) : null}
             {strategies.length > 0 && (
               <div className="mb-3 flex flex-wrap gap-x-5 gap-y-2 items-start">
-                <span className="text-xs text-muted font-medium uppercase tracking-wider flex-shrink-0 mt-1">
+                <span className="text-xs text-muted-text font-medium uppercase tracking-wider flex-shrink-0 mt-1">
                   策略
                 </span>
                 <label className="flex items-center gap-1.5 text-sm cursor-pointer group mt-0.5">
@@ -688,7 +708,7 @@ const ChatPage: React.FC = () => {
                     className="w-3.5 h-3.5 accent-cyan"
                   />
                   <span
-                    className={`transition-colors text-sm ${selectedStrategy === '' ? 'text-white font-medium' : 'text-secondary group-hover:text-white'}`}
+                    className={`transition-colors text-sm ${selectedStrategy === '' ? 'text-white font-medium' : 'text-secondary-text group-hover:text-white'}`}
                   >
                     通用分析
                   </span>
@@ -709,12 +729,12 @@ const ChatPage: React.FC = () => {
                       className="w-3.5 h-3.5 accent-cyan"
                     />
                     <span
-                      className={`transition-colors text-sm ${selectedStrategy === s.id ? 'text-white font-medium' : 'text-secondary group-hover:text-white'}`}
+                      className={`transition-colors text-sm ${selectedStrategy === s.id ? 'text-white font-medium' : 'text-secondary-text group-hover:text-white'}`}
                     >
                       {s.name}
                     </span>
                     {showStrategyDesc === s.id && s.description && (
-                      <div className="absolute left-0 bottom-full mb-2 z-50 w-64 p-2.5 rounded-lg bg-elevated border border-white/10 shadow-xl text-xs text-secondary leading-relaxed pointer-events-none animate-fade-in">
+                      <div className="absolute left-0 bottom-full mb-2 z-50 w-64 p-2.5 rounded-lg bg-elevated border border-white/10 shadow-xl text-xs text-secondary-text leading-relaxed pointer-events-none animate-fade-in">
                         <p className="font-medium text-white mb-1">{s.name}</p>
                         <p>{s.description}</p>
                       </div>
@@ -740,48 +760,15 @@ const ChatPage: React.FC = () => {
                   t.style.height = `${Math.min(t.scrollHeight, 200)}px`;
                 }}
               />
-              <button
+              <Button
+                variant="primary"
                 onClick={() => handleSend()}
                 disabled={!input.trim() || loading}
-                className="btn-primary h-[44px] px-6 flex-shrink-0 flex items-center justify-center gap-2"
+                isLoading={loading}
+                className="h-[44px] px-6 flex-shrink-0"
               >
-                {loading ? (
-                  <svg
-                    className="w-4 h-4 animate-spin"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                  >
-                    <circle
-                      className="opacity-25"
-                      cx="12"
-                      cy="12"
-                      r="10"
-                      stroke="currentColor"
-                      strokeWidth="4"
-                    />
-                    <path
-                      className="opacity-75"
-                      fill="currentColor"
-                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                    />
-                  </svg>
-                ) : (
-                  <svg
-                    className="w-4 h-4"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
-                    />
-                  </svg>
-                )}
                 发送
-              </button>
+              </Button>
             </div>
           </div>
         </div>

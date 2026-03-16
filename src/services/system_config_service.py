@@ -243,8 +243,10 @@ class SystemConfigService:
         if reload_now:
             try:
                 Config.reset_instance()
+                from src.agent.tools.data_tools import reset_fetcher_manager
                 from src.search_service import reset_search_service
 
+                reset_fetcher_manager()
                 reset_search_service()
                 setup_env(override=True)
                 config = Config.get_instance()

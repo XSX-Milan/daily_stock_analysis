@@ -4,7 +4,7 @@
 
 > 💡 快速上手请参考 [README.md](../README.md)，本文档为进阶配置。
 
-## � 项目结构
+## 📁 项目结构
 
 ```
 daily_stock_analysis/
@@ -75,7 +75,7 @@ daily_stock_analysis/
 | `TELEGRAM_MESSAGE_THREAD_ID` | Telegram Topic ID (用于发送到子话题) | 可选 |
 | `DISCORD_WEBHOOK_URL` | Discord Webhook URL（[创建方法](https://support.discord.com/hc/en-us/articles/228383668)） | 可选 |
 | `DISCORD_BOT_TOKEN` | Discord Bot Token（与 Webhook 二选一） | 可选 |
-| `DISCORD_CHANNEL_ID` | Discord Channel ID（使用 Bot 时需要） | 可选 |
+| `DISCORD_MAIN_CHANNEL_ID` | Discord Channel ID（使用 Bot 时需要） | 可选 |
 | `EMAIL_SENDER` | 发件人邮箱（如 `xxx@qq.com`） | 可选 |
 | `EMAIL_PASSWORD` | 邮箱授权码（非登录密码） | 可选 |
 | `EMAIL_RECEIVERS` | 收件人邮箱（多个用逗号分隔，留空则发给自己） | 可选 |
@@ -189,7 +189,7 @@ daily_stock_analysis/
 | `TELEGRAM_MESSAGE_THREAD_ID` | Telegram Topic ID | 可选 |
 | `DISCORD_WEBHOOK_URL` | Discord Webhook URL | 可选 |
 | `DISCORD_BOT_TOKEN` | Discord Bot Token（与 Webhook 二选一） | 可选 |
-| `DISCORD_CHANNEL_ID` | Discord Channel ID（使用 Bot 时需要） | 可选 |
+| `DISCORD_MAIN_CHANNEL_ID` | Discord Channel ID（使用 Bot 时需要） | 可选 |
 | `DISCORD_MAX_WORDS` | Discord 最大字数限制（默认 免费服务器限制2000） | 可选 |
 | `EMAIL_SENDER` | 发件人邮箱 | 可选 |
 | `EMAIL_PASSWORD` | 邮箱授权码（非登录密码） | 可选 |
@@ -586,7 +586,7 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/yyy
 
 ```bash
 DISCORD_BOT_TOKEN=your_bot_token
-DISCORD_CHANNEL_ID=your_channel_id
+DISCORD_MAIN_CHANNEL_ID=your_channel_id
 ```
 
 ### Pushover（iOS/Android 推送）
@@ -833,6 +833,8 @@ FastAPI 提供 RESTful API 服务，支持配置管理和触发分析。
 | `/api/health` | GET | 健康检查 |
 | `/docs` | GET | API Swagger 文档 |
 
+> 说明：`POST /api/v1/analysis/analyze` 在 `async_mode=false` 时仅支持单只股票；批量 `stock_codes` 需使用 `async_mode=true`。异步 `202` 响应对单股返回 `task_id`，对批量返回 `accepted` / `duplicates` 汇总结构。
+
 **调用示例**：
 ```bash
 # 健康检查
@@ -910,3 +912,124 @@ A: 检查是否启用了 Actions，以及 cron 表达式是否正确（注意是
 ---
 
 更多问题请 [提交 Issue](https://github.com/ZhuLinsen/daily_stock_analysis/issues)
+
+## Portfolio P0 PR1 (Core Ledger and Snapshot)
+
+### Scope
+- Core portfolio domain models:
+  - account, trade, cash ledger, corporate action, position cache, lot cache, daily snapshot, fx cache
+- Core service capability:
+  - account CRUD
+  - event writes
+  - read-time replay snapshot for one account or all active accounts
+
+### Accounting semantics
+- Cost method:
+  - `fifo` (default)
+  - `avg`
+- Same-day event ordering:
+  - `cash -> corporate action -> trade`
+- Corporate action effective-date rule:
+  - `effective_date` is treated as effective before market trading on that day.
+
+### Error and stability semantics
+- `trade_uid` unique conflict returns `409` (API conflict semantics).
+- Snapshot write path is atomic for positions/lots/daily snapshot.
+- FX conversion keeps fail-open behavior (fallback 1:1 with stale marker) to avoid pipeline interruption.
+
+### Test coverage in PR1
+- FIFO/AVG partial sell replay
+- Dividend and split replay
+- Same-day ordering (dividend/trade, split/trade)
+- API account/event/snapshot contract
+- API duplicate trade_uid conflict
+
+## Portfolio P0 PR2 (Import and Risk)
+
+### CSV import
+- Supported broker ids: `huatai`, `citic`, `cmb`.
+- Unified workflow: parse CSV into normalized records, then commit into portfolio trades.
+- Dedup policy:
+  - First key: `trade_uid` (account-scoped)
+  - Fallback key: deterministic hash of date/symbol/side/qty/price/fee/tax/currency
+
+### Risk report
+- Concentration monitoring: top position weight alert by config threshold.
+- Drawdown monitoring: max/current drawdown computed from daily snapshots.
+- Stop-loss proximity warning: mark near-alert and triggered items with threshold echo.
+
+### FX fail-open
+- FX refresh first tries online source (YFinance).
+- On online failure, fallback to latest cached rate and mark `is_stale=true`.
+- Main snapshot/risk pipeline stays available even when online FX fetch is unavailable.
+
+## Portfolio P0 PR3 (Web + Agent Consumption)
+
+### Web consumption page
+- Added Web page route: `/portfolio` (`apps/dsa-web/src/pages/PortfolioPage.tsx`).
+- Data sources:
+  - `GET /api/v1/portfolio/snapshot`
+  - `GET /api/v1/portfolio/risk`
+- Supports:
+  - full portfolio / single account switch
+  - cost method switch (`fifo` / `avg`)
+  - concentration pie chart (Top Positions) with Recharts
+  - snapshot KPI cards and risk summary cards
+
+### Agent tool
+- Added `get_portfolio_snapshot` data tool for account-aware LLM suggestions.
+- Default behavior:
+  - compact summary output (token-friendly)
+  - includes optional compact risk block
+- Optional parameters:
+  - `account_id`
+  - `cost_method` (`fifo` / `avg`)
+  - `as_of` (`YYYY-MM-DD`)
+  - `include_positions` (default `false`)
+  - `include_risk` (default `true`)
+
+### Stability and compatibility
+- New capability is additive only; no removal of existing keys/routes.
+- Fail-open semantics:
+  - If risk block fails, snapshot is still returned.
+  - If portfolio module is unavailable, tool returns structured `not_supported`.
+
+## Portfolio P0 PR4 (Gap Closure)
+
+### API query closure
+- Added event query endpoints:
+  - `GET /api/v1/portfolio/trades`
+  - `GET /api/v1/portfolio/cash-ledger`
+  - `GET /api/v1/portfolio/corporate-actions`
+- Unified query parameters:
+  - `account_id`, `date_from`, `date_to`, `page`, `page_size`
+- Trade/cash/corporate-action specific filters:
+  - trades: `symbol`, `side`
+  - cash-ledger: `direction`
+  - corporate-actions: `symbol`, `action_type`
+- Unified response shape:
+  - `items`, `total`, `page`, `page_size`
+
+### CSV import framework
+- Reworked parser logic into extensible parser registry.
+- Built-in adapters remain: `huatai`, `citic`, `cmb` with alias mapping.
+- Added parser discovery endpoint:
+  - `GET /api/v1/portfolio/imports/csv/brokers`
+
+### Web closure
+- `/portfolio` page now includes:
+  - inline account creation entry with empty-state guide and auto-switch to created account
+  - manual event entry forms: trade / cash / corporate action
+  - CSV parse + commit operations (supports `dry_run`)
+  - event list panel with filters and pagination
+  - broker selector fallback to built-in brokers (`huatai/citic/cmb`) when broker list API fails or returns empty
+
+### Risk sector concentration semantics
+- Added `sector_concentration` in `GET /api/v1/portfolio/risk`.
+- Mapping rules:
+  - CN positions try board mapping from `get_belong_boards`.
+  - Non-CN or mapping failure falls back to `UNCLASSIFIED`.
+  - Uses single primary board per symbol to avoid duplicate weighting.
+- Fail-open:
+  - board lookup errors do not interrupt risk response.
+  - response returns coverage/error details for explainability.

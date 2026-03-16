@@ -74,7 +74,7 @@ export const ReportMarkdown: React.FC<ReportMarkdownProps> = ({
         </div>
         <div>
           <h2 className="text-base font-semibold text-white">{stockName || stockCode}</h2>
-          <p className="text-xs text-muted">完整分析报告</p>
+          <p className="text-xs text-muted-text">完整分析报告</p>
         </div>
       </div>
 
@@ -82,7 +82,7 @@ export const ReportMarkdown: React.FC<ReportMarkdownProps> = ({
       {isLoading ? (
         <div className="flex flex-col items-center justify-center h-64">
           <div className="w-10 h-10 border-3 border-purple/20 border-t-purple rounded-full animate-spin" />
-          <p className="mt-4 text-secondary text-sm">加载报告中...</p>
+          <p className="mt-4 text-secondary-text text-sm">加载报告中...</p>
         </div>
       ) : error ? (
         <div className="flex flex-col items-center justify-center h-64">
@@ -95,7 +95,7 @@ export const ReportMarkdown: React.FC<ReportMarkdownProps> = ({
           <button
             type="button"
             onClick={handleClose}
-            className="mt-4 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-secondary transition-colors"
+            className="mt-4 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-secondary-text transition-colors"
           >
             关闭
           </button>
@@ -118,7 +118,7 @@ export const ReportMarkdown: React.FC<ReportMarkdownProps> = ({
             prose-hr:border-white/10 prose-hr:my-4
             prose-a:text-cyan prose-a:no-underline hover:prose-a:underline
             prose-blockquote:border-purple/30 prose-blockquote:bg-purple/5 prose-blockquote:py-2 prose-blockquote:px-4 prose-blockquote:rounded-r-lg
-            prose-blockquote:text-secondary
+            prose-blockquote:text-secondary-text
             whitespace-pre-line break-words
           "
         >
@@ -133,7 +133,7 @@ export const ReportMarkdown: React.FC<ReportMarkdownProps> = ({
         <button
           type="button"
           onClick={handleClose}
-          className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-secondary hover:text-white transition-colors"
+          className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-secondary-text hover:text-white transition-colors"
         >
           关闭
         </button>

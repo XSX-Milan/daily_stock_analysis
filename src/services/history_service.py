@@ -9,15 +9,17 @@ Responsibilities:
 2. Provide pagination and filtering functionality
 3. Generate detailed reports in Markdown format
 """
-
+from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 
 from src.storage import DatabaseManager
 from src.utils.data_processing import normalize_model_used, parse_json_field
-from src.analyzer import AnalysisResult
+
+if TYPE_CHECKING:
+    from src.analyzer import AnalysisResult
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +476,7 @@ class HistoryService:
             AnalysisResult object or None
         """
         try:
+            from src.analyzer import AnalysisResult
             # Extract dashboard data if available
             dashboard = raw_result.get("dashboard", {})
 

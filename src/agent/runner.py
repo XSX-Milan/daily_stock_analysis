@@ -98,6 +98,64 @@ def serialize_tool_result(result: Any) -> str:
     return str(result)
 
 
+def _normalize_tool_stock_code(value: Any) -> Any:
+    """Canonicalize stock code arguments so equivalent HK variants share one cache key."""
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip().upper()
+    if not text:
+        return text
+
+    if text.endswith(".HK"):
+        base = text[:-3]
+        if base.isdigit() and 1 <= len(base) <= 5:
+            return f"HK{base.zfill(5)}"
+
+    if text.startswith("HK"):
+        base = text[2:]
+        if base.isdigit() and 1 <= len(base) <= 5:
+            return f"HK{base.zfill(5)}"
+
+    if text.isdigit() and len(text) == 5:
+        return f"HK{text}"
+
+    try:
+        from data_provider.base import canonical_stock_code, normalize_stock_code
+
+        return canonical_stock_code(normalize_stock_code(text))
+    except Exception:
+        return text
+
+
+def _build_tool_cache_key(tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
+    """Build a stable cache key for tool calls with normalized stock-code arguments."""
+    if not isinstance(arguments, dict):
+        return None
+
+    normalized_args: Dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key == "stock_code":
+            normalized_args[key] = _normalize_tool_stock_code(value)
+        else:
+            normalized_args[key] = value
+
+    try:
+        payload = json.dumps(normalized_args, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return f"{tool_name}:{payload}"
+
+
+def _is_non_retriable_tool_result(result: Any) -> bool:
+    """Return True when a tool result explicitly tells the agent not to retry."""
+    return (
+        isinstance(result, dict)
+        and bool(result.get("error"))
+        and result.get("retriable") is False
+    )
+
+
 def parse_dashboard_json(content: str) -> Optional[Dict[str, Any]]:
     """Extract and parse a Decision Dashboard JSON from agent text.
 
@@ -267,6 +325,7 @@ def run_agent_loop(
 
     start_time = time.time()
     tool_calls_log: List[Dict[str, Any]] = []
+    non_retriable_tool_results: Dict[str, str] = {}
     total_tokens = 0
     provider_used = ""
     models_used: List[str] = []
@@ -328,6 +387,7 @@ def run_agent_loop(
                 step + 1,
                 progress_callback,
                 tool_calls_log,
+                non_retriable_tool_results,
             )
 
             # Append tool results preserving original call order
@@ -394,6 +454,7 @@ def _execute_tools(
     step: int,
     progress_callback: Optional[Callable],
     tool_calls_log: List[Dict[str, Any]],
+    non_retriable_tool_results: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Execute one or more tool calls, returning ordered result dicts.
 
@@ -402,16 +463,29 @@ def _execute_tools(
 
     def _exec_single(tc_item):
         t0 = time.time()
+        cache_key = _build_tool_cache_key(tc_item.name, tc_item.arguments)
+
+        if cache_key and non_retriable_tool_results is not None and cache_key in non_retriable_tool_results:
+            dur = round(time.time() - t0, 2)
+            logger.info(
+                "Tool '%s' skipped via non-retriable cache for arguments=%s",
+                tc_item.name,
+                tc_item.arguments,
+            )
+            return tc_item, non_retriable_tool_results[cache_key], False, dur, True
+
         try:
             res = tool_registry.execute(tc_item.name, **tc_item.arguments)
             res_str = serialize_tool_result(res)
             ok = True
+            if cache_key and non_retriable_tool_results is not None and _is_non_retriable_tool_result(res):
+                non_retriable_tool_results[cache_key] = res_str
         except Exception as e:
             res_str = json.dumps({"error": str(e)})
             ok = False
             logger.warning("Tool '%s' failed: %s", tc_item.name, e)
         dur = round(time.time() - t0, 2)
-        return tc_item, res_str, ok, dur
+        return tc_item, res_str, ok, dur, False
 
     results: List[Dict[str, Any]] = []
 
@@ -419,12 +493,13 @@ def _execute_tools(
         tc = tool_calls[0]
         if progress_callback:
             progress_callback({"type": "tool_start", "step": step, "tool": tc.name})
-        _, result_str, success, dur = _exec_single(tc)
+        _, result_str, success, dur, cached = _exec_single(tc)
         if progress_callback:
             progress_callback({"type": "tool_done", "step": step, "tool": tc.name, "success": success, "duration": dur})
         tool_calls_log.append({
             "step": step, "tool": tc.name, "arguments": tc.arguments,
             "success": success, "duration": dur, "result_length": len(result_str),
+            "cached": cached,
         })
         results.append({"tc": tc, "result_str": result_str})
     else:
@@ -435,12 +510,13 @@ def _execute_tools(
         with ThreadPoolExecutor(max_workers=min(len(tool_calls), 5)) as pool:
             futures = {pool.submit(_exec_single, tc): tc for tc in tool_calls}
             for future in as_completed(futures):
-                tc_item, result_str, success, dur = future.result()
+                tc_item, result_str, success, dur, cached = future.result()
                 if progress_callback:
                     progress_callback({"type": "tool_done", "step": step, "tool": tc_item.name, "success": success, "duration": dur})
                 tool_calls_log.append({
                     "step": step, "tool": tc_item.name, "arguments": tc_item.arguments,
                     "success": success, "duration": dur, "result_length": len(result_str),
+                    "cached": cached,
                 })
                 results.append({"tc": tc_item, "result_str": result_str})
 

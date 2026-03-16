@@ -600,6 +600,14 @@ class Config:
     # 基本面缓存最大条目数（避免长时间运行内存增长）
     fundamental_cache_max_entries: int = 256
 
+    # === Portfolio PR2: import/risk/fx settings ===
+    portfolio_risk_concentration_alert_pct: float = 35.0
+    portfolio_risk_drawdown_alert_pct: float = 15.0
+    portfolio_risk_stop_loss_alert_pct: float = 10.0
+    portfolio_risk_stop_loss_near_ratio: float = 0.8
+    portfolio_risk_lookback_days: int = 180
+    portfolio_fx_update_enabled: bool = True
+
     # Discord 机器人状态
     discord_bot_status: str = "A股智能分析 | /help"
 
@@ -1072,7 +1080,9 @@ class Config:
             webhook_verify_ssl=os.getenv("WEBHOOK_VERIFY_SSL", "true").lower()
             == "true",
             discord_bot_token=os.getenv("DISCORD_BOT_TOKEN"),
-            discord_main_channel_id=os.getenv("DISCORD_MAIN_CHANNEL_ID"),
+            discord_main_channel_id=(
+                os.getenv("DISCORD_MAIN_CHANNEL_ID") or os.getenv("DISCORD_CHANNEL_ID")
+            ),
             discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL"),
             astrbot_url=os.getenv("ASTRBOT_URL"),
             astrbot_token=os.getenv("ASTRBOT_TOKEN"),
@@ -1242,6 +1252,25 @@ class Config:
             fundamental_cache_max_entries=int(
                 os.getenv("FUNDAMENTAL_CACHE_MAX_ENTRIES", "256")
             ),
+            portfolio_risk_concentration_alert_pct=float(
+                os.getenv("PORTFOLIO_RISK_CONCENTRATION_ALERT_PCT", "35.0")
+            ),
+            portfolio_risk_drawdown_alert_pct=float(
+                os.getenv("PORTFOLIO_RISK_DRAWDOWN_ALERT_PCT", "15.0")
+            ),
+            portfolio_risk_stop_loss_alert_pct=float(
+                os.getenv("PORTFOLIO_RISK_STOP_LOSS_ALERT_PCT", "10.0")
+            ),
+            portfolio_risk_stop_loss_near_ratio=float(
+                os.getenv("PORTFOLIO_RISK_STOP_LOSS_NEAR_RATIO", "0.8")
+            ),
+            portfolio_risk_lookback_days=int(
+                os.getenv("PORTFOLIO_RISK_LOOKBACK_DAYS", "180")
+            ),
+            portfolio_fx_update_enabled=os.getenv(
+                "PORTFOLIO_FX_UPDATE_ENABLED", "true"
+            ).lower()
+            == "true",
         )
 
     @classmethod

@@ -78,14 +78,14 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
       )}
 
       {isLoading && !error && (
-        <div className="flex items-center gap-2 text-xs text-secondary">
+        <div className="flex items-center gap-2 text-xs text-secondary-text">
           <div className="w-4 h-4 border-2 border-cyan/20 border-t-cyan rounded-full animate-spin" />
           加载资讯中...
         </div>
       )}
 
       {!isLoading && !error && items.length === 0 && (
-        <div className="text-xs text-muted">暂无相关资讯</div>
+        <div className="text-xs text-muted-text">暂无相关资讯</div>
       )}
 
       {!isLoading && !error && items.length > 0 && (
@@ -101,7 +101,7 @@ export const ReportNews: React.FC<ReportNewsProps> = ({ recordId, limit = 20 }) 
                     {item.title}
                   </p>
                   {item.snippet && (
-                    <p className="text-xs text-secondary mt-1 text-left">
+                    <p className="text-xs text-secondary-text mt-1 text-left">
                       {item.snippet}
                     </p>
                   )}

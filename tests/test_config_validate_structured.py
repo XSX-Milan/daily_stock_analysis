@@ -361,6 +361,52 @@ class TestVisionKeyValidation:
 
 
 # ---------------------------------------------------------------------------
+# Env alias compatibility
+# ---------------------------------------------------------------------------
+
+class TestEnvAliasCompatibility:
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_discord_channel_id_legacy_alias_is_still_loaded(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ):
+        with patch.dict(
+            "os.environ",
+            {
+                "DISCORD_BOT_TOKEN": "token",
+                "DISCORD_CHANNEL_ID": "legacy-channel",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        assert config.discord_bot_token == "token"
+        assert config.discord_main_channel_id == "legacy-channel"
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_discord_main_channel_id_takes_precedence_over_legacy_alias(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ):
+        with patch.dict(
+            "os.environ",
+            {
+                "DISCORD_BOT_TOKEN": "token",
+                "DISCORD_CHANNEL_ID": "legacy-channel",
+                "DISCORD_MAIN_CHANNEL_ID": "main-channel",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        assert config.discord_main_channel_id == "main-channel"
+
+
+# ---------------------------------------------------------------------------
 # validate() backward compatibility
 # ---------------------------------------------------------------------------
 

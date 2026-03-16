@@ -228,8 +228,13 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["resolved_protocol"], "openai")
         self.assertEqual(payload["resolved_model"], "openai/deepseek-chat")
 
+    @patch("src.agent.tools.data_tools.reset_fetcher_manager")
     @patch("src.search_service.reset_search_service")
-    def test_update_with_reload_resets_search_service_singleton(self, mock_reset_search_service) -> None:
+    def test_update_with_reload_resets_runtime_singletons(
+        self,
+        mock_reset_search_service,
+        mock_reset_fetcher_manager,
+    ) -> None:
         response = self.service.update(
             config_version=self.manager.get_config_version(),
             items=[{"key": "STOCK_LIST", "value": "600519"}],
@@ -238,6 +243,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
 
         self.assertTrue(response["success"])
         mock_reset_search_service.assert_called_once()
+        mock_reset_fetcher_manager.assert_called_once()
 
     def test_update_raises_conflict_for_stale_version(self) -> None:
         with self.assertRaises(ConfigConflictError):

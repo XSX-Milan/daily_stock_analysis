@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
 
 from src.agent.agents.base_agent import BaseAgent
+from src.agent.memory import AgentMemory
 from src.agent.protocols import (
     AgentContext,
     AgentOpinion,
@@ -22,6 +24,9 @@ from src.agent.agents.portfolio_agent import PortfolioAgent
 from src.agent.agents.risk_agent import RiskAgent
 from src.agent.agents.technical_agent import TechnicalAgent
 from src.stock_analyzer import StockTrendAnalyzer
+
+
+logger = logging.getLogger(__name__)
 
 
 _DIMENSION_PROFILES: dict[str, dict[str, str]] = {
@@ -75,6 +80,7 @@ class RecommendationAgent(BaseAgent):
         self.profile = dict(_DIMENSION_PROFILES[self.dimension])
         self.agent_name = f"recommendation_{self.dimension}"
         self._trend_analyzer = StockTrendAnalyzer()
+        self._agent_memory = AgentMemory.from_config()
 
     def system_prompt(self, ctx: AgentContext) -> str:
         del ctx
@@ -102,7 +108,8 @@ class RecommendationAgent(BaseAgent):
             delegated = self._collect_delegated_opinions(ctx)
             trend_score = self._analyze_trend_score(ctx)
             dimension_score = self._dimension_score(ctx, trend_score, delegated)
-            confidence = self._confidence_score(ctx, delegated)
+            raw_confidence = self._confidence_score(ctx, delegated)
+            confidence = self._calibrate_confidence(raw_confidence, ctx.stock_code)
             signal = self._score_to_signal(dimension_score)
 
             opinion = AgentOpinion(
@@ -492,6 +499,31 @@ class RecommendationAgent(BaseAgent):
         delegated_bonus = min(0.28, len(delegated) * 0.07)
         confidence = 0.45 + completeness + delegated_bonus
         return self._clamp_0_1(confidence)
+
+    def _calibrate_confidence(
+        self, raw_confidence: float, stock_code: Optional[str]
+    ) -> float:
+        calibrated_confidence = raw_confidence
+        try:
+            calibrated_confidence = self._agent_memory.calibrate_confidence(
+                self.agent_name,
+                raw_confidence,
+                stock_code,
+            )
+        except Exception as exc:
+            logger.debug("[%s] confidence calibration failed: %s", self.agent_name, exc)
+            calibrated_confidence = raw_confidence
+
+        calibration_applied = abs(calibrated_confidence - raw_confidence) > 1e-9
+        logger.info(
+            "[%s] confidence calibration applied=%s raw=%.4f final=%.4f stock=%s",
+            self.agent_name,
+            calibration_applied,
+            raw_confidence,
+            calibrated_confidence,
+            stock_code or "UNKNOWN",
+        )
+        return self._clamp_0_1(calibrated_confidence)
 
     def _build_reasoning(
         self,

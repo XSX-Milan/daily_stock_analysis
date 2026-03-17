@@ -19,7 +19,6 @@ from src.analyzer import GeminiAnalyzer
 from src.config import get_config
 from src.recommendation.constants import (
     DEFAULT_SCORING_WEIGHTS,
-    DEFAULT_TOP_N_PER_SECTOR,
     POSITION_MIN_SCORE,
 )
 from src.recommendation.sector_cache import SectorCacheService
@@ -46,20 +45,25 @@ class RecommendationService:
 
     SCORING_WEIGHTS_KEY = "recommendation.scoring_weights"
     SECTOR_CACHE_TYPE = "industry"
-    DEFAULT_REFRESH_SKIP_SECONDS = 300
 
     def __init__(self, config: Any = None) -> None:
         self.config = config or get_config()
+
+        def _config_int(*keys: str, default: int) -> int:
+            for key in keys:
+                if hasattr(self.config, key):
+                    value = getattr(self.config, key)
+                    if value is not None:
+                        try:
+                            return int(value)
+                        except (TypeError, ValueError):
+                            continue
+            return int(default)
+
         self.max_workers = max(1, int(getattr(self.config, "max_workers", 4)))
         self.refresh_skip_seconds = max(
             0,
-            int(
-                getattr(
-                    self.config,
-                    "recommend_refresh_skip_seconds",
-                    self.DEFAULT_REFRESH_SKIP_SECONDS,
-                )
-            ),
+            _config_int("recommend_refresh_skip_seconds", default=300),
         )
 
         self.fetcher_manager = DataFetcherManager()
@@ -72,33 +76,36 @@ class RecommendationService:
             self.fetcher_manager,
             top_n=max(
                 1,
-                int(
-                    getattr(
-                        self.config,
-                        "recommend_sector_top_n",
-                        getattr(
-                            self.config,
-                            "recommendation_top_n_per_sector",
-                            DEFAULT_TOP_N_PER_SECTOR,
-                        ),
-                    )
+                _config_int(
+                    "recommend_top_n_per_sector",
+                    "recommend_sector_top_n",
+                    "recommendation_top_n_per_sector",
+                    default=5,
                 ),
             ),
             max_universe=max(
-                1, int(getattr(self.config, "recommendation_max_universe", 200))
+                1,
+                _config_int(
+                    "recommend_max_universe",
+                    "recommendation_max_universe",
+                    default=200,
+                ),
+            ),
+        )
+        self.recommend_top_n_per_sector = max(
+            1,
+            _config_int(
+                "recommend_top_n_per_sector",
+                "recommend_sector_top_n",
+                "recommendation_top_n_per_sector",
+                default=5,
             ),
         )
         self.recommend_score_threshold_ai = max(
             0,
             min(
                 100,
-                int(
-                    getattr(
-                        self.config,
-                        "recommend_score_threshold_ai",
-                        POSITION_MIN_SCORE,
-                    )
-                ),
+                _config_int("recommend_score_threshold_ai", default=60),
             ),
         )
         self.db_manager = DatabaseManager.get_instance()
@@ -134,26 +141,26 @@ class RecommendationService:
         sector_by_code: dict[str, str] = {}
         sector_codes: list[str] = []
 
-        if target_region == MarketRegion.CN:
-            sector_codes = self.sector_scanner_service.get_sector_stocks(
-                target_sector,
-                limit=self.sector_scanner_service.max_universe,
-            )
-            for code in sector_codes:
-                sector_by_code[code] = target_sector
-                self.sector_cache_service.save_sector_info(
-                    code,
-                    SectorInfo(
-                        sector_name=target_sector,
-                        sector_type=self.SECTOR_CACHE_TYPE,
-                        fetched_at=datetime.utcnow(),
-                    ),
-                )
-        else:
+        sector_codes = self.sector_scanner_service.get_sector_stocks(
+            target_sector,
+            limit=self.sector_scanner_service.max_universe,
+            market=target_region.value,
+        )
+        if not sector_codes and target_region != MarketRegion.CN:
             logger.info(
-                "Skip sector scan expansion for market=%s, sector=%s",
+                "Sector scan returned no codes for market=%s, sector=%s",
                 target_region.value,
                 target_sector,
+            )
+        for code in sector_codes:
+            sector_by_code[code] = target_sector
+            self.sector_cache_service.save_sector_info(
+                code,
+                SectorInfo(
+                    sector_name=target_sector,
+                    sector_type=self.SECTOR_CACHE_TYPE,
+                    fetched_at=datetime.utcnow(),
+                ),
             )
 
         watchlist_codes = [
@@ -269,7 +276,24 @@ class RecommendationService:
                 deduplicated_codes,
             )
 
-        composite_scores = self.scoring_engine.score_batch(score_inputs)
+        score_filtered_inputs = self._select_score_first_inputs(
+            score_inputs=score_inputs,
+            payload_by_code=payload_by_code,
+            score_first_enabled=sector is not None,
+            market=market,
+            sector=sector,
+        )
+        if not score_filtered_inputs:
+            return self._sort_recommendations(
+                [
+                    cached_by_code[code]
+                    for code in deduplicated_codes
+                    if code in cached_by_code
+                ],
+                deduplicated_codes,
+            )
+
+        composite_scores = self.scoring_engine.score_batch(score_filtered_inputs)
         normalized_sector_by_code = {
             str(code).strip(): value
             for code, value in resolved_sector_by_code.items()
@@ -277,7 +301,7 @@ class RecommendationService:
         }
 
         new_recommendations: list[StockRecommendation] = []
-        for (code, _), composite_score in zip(score_inputs, composite_scores):
+        for (code, _), composite_score in zip(score_filtered_inputs, composite_scores):
             self._apply_ai_threshold_override(code, composite_score)
             payload = payload_by_code[code]
             sector_value = normalized_sector_by_code.get(code) or payload.get("sector")
@@ -298,7 +322,7 @@ class RecommendationService:
 
         sorted_new_recommendations = self._sort_recommendations(
             new_recommendations,
-            codes_to_refresh,
+            [code for code, _ in score_filtered_inputs],
         )
 
         merged_by_code = dict(cached_by_code)
@@ -315,6 +339,87 @@ class RecommendationService:
         )
         self.recommendation_repo.save_batch(sorted_new_recommendations)
         return merged_recommendations
+
+    def _select_score_first_inputs(
+        self,
+        score_inputs: list[tuple[str, StockScoringData]],
+        payload_by_code: dict[str, dict[str, Any]],
+        score_first_enabled: bool,
+        market: str | MarketRegion | None,
+        sector: str | None,
+    ) -> list[tuple[str, StockScoringData]]:
+        total_count = len(score_inputs)
+        if total_count == 0:
+            return []
+
+        market_value = str(getattr(market, "value", market) or "-")
+        sector_value = str(sector or "-")
+
+        if not score_first_enabled:
+            logger.info(
+                "Recommendation refresh staged counts | Total stocks: %d | After scoring filter: %d | Agent analyzed: %d | market=%s | sector=%s | score_first=false",
+                total_count,
+                total_count,
+                total_count,
+                market_value,
+                sector_value,
+            )
+            return list(score_inputs)
+
+        ranked_inputs: list[tuple[int, str, StockScoringData, float]] = []
+        for index, (code, scoring_data) in enumerate(score_inputs):
+            payload = payload_by_code.get(code) or {}
+            trend_result = getattr(scoring_data, "trend_result", None)
+            raw_signal_score = getattr(trend_result, "signal_score", None)
+            if raw_signal_score is None:
+                raw_signal_score = payload.get("signal_score")
+
+            if raw_signal_score is None:
+                signal_score = 0.0
+            else:
+                try:
+                    signal_score = float(raw_signal_score)
+                except (TypeError, ValueError):
+                    signal_score = 0.0
+            if pd.isna(signal_score):
+                signal_score = 0.0
+
+            clamped_score = max(0.0, min(100.0, signal_score))
+            ranked_inputs.append((index, code, scoring_data, clamped_score))
+
+        ranked_inputs.sort(key=lambda item: (-item[3], item[0]))
+        threshold = float(self.recommend_score_threshold_ai)
+        threshold_filtered = [item for item in ranked_inputs if item[3] >= threshold]
+
+        used_threshold = True
+        if threshold > 0 and not threshold_filtered and ranked_inputs:
+            threshold_filtered = ranked_inputs
+            used_threshold = False
+            logger.info(
+                "Score-first threshold produced empty candidates, fallback to top-N only | threshold=%.2f | market=%s | sector=%s",
+                threshold,
+                market_value,
+                sector_value,
+            )
+
+        top_n = max(1, int(self.recommend_top_n_per_sector))
+        filtered_inputs = [
+            (code, scoring_data)
+            for _, code, scoring_data, _ in threshold_filtered[:top_n]
+        ]
+
+        logger.info(
+            "Recommendation refresh staged counts | Total stocks: %d | After scoring filter: %d | Agent analyzed: %d | top_n=%d | threshold=%.2f | threshold_applied=%s | market=%s | sector=%s",
+            total_count,
+            len(filtered_inputs),
+            len(filtered_inputs),
+            top_n,
+            threshold,
+            str(used_threshold).lower(),
+            market_value,
+            sector_value,
+        )
+        return filtered_inputs
 
     @staticmethod
     def _parse_market_region(value: str | MarketRegion | None) -> MarketRegion:

@@ -16,11 +16,11 @@ const DEFAULT_WEIGHTS: ScoringWeights = {
 };
 
 const DIMENSIONS = [
-  { key: 'technical', label: 'TECH' },
-  { key: 'fundamental', label: 'FUND' },
-  { key: 'sentiment', label: 'SENT' },
-  { key: 'macro', label: 'MACR' },
-  { key: 'risk', label: 'RISK' },
+  { key: 'technical', label: '技术' },
+  { key: 'fundamental', label: '基本面' },
+  { key: 'sentiment', label: '情绪' },
+  { key: 'macro', label: '宏观' },
+  { key: 'risk', label: '风险' },
 ] as const;
 
 const clamp = (val: number) => Math.max(0, Math.min(100, val));
@@ -79,11 +79,11 @@ export const ScoreBar: React.FC<ScoreBarProps> = ({
             data-testid="score-segment-composite"
             className="h-full transition-all duration-500 rounded score-segment-tooltip"
             style={{ width: '100%', backgroundColor: color }}
-            data-tooltip={`COMPOSITE: ${clampedScore.toFixed(1)}`}
+            data-tooltip={`综合: ${clampedScore.toFixed(1)}`}
           />
         </div>
         <div className="flex justify-between mt-1 text-[10px] font-mono text-gray-500">
-          <span>COMPOSITE</span>
+          <span>综合</span>
         </div>
       </div>
     );
@@ -141,7 +141,7 @@ export const ScoreBar: React.FC<ScoreBarProps> = ({
               data-testid={`score-segment-${key}`}
               className="h-full transition-all duration-500 first:rounded-l last:rounded-r score-segment-tooltip"
               style={{ width: `${widthPercent}%`, backgroundColor: color }}
-              data-tooltip={`${label}: ${score.toFixed(1)} (W: ${weight}%)`}
+              data-tooltip={`${label}: ${score.toFixed(1)} (权重: ${weight}%)`}
             />
           );
         })}

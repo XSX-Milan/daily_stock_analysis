@@ -8,6 +8,7 @@ const categoryTitleMap: Record<SystemConfigCategory, string> = {
   system: '系统设置',
   agent: 'Agent 设置',
   backtest: '回测配置',
+  recommendation: '推荐设置',
   uncategorized: '其他',
 };
 
@@ -19,6 +20,7 @@ const categoryDescriptionMap: Partial<Record<SystemConfigCategory, string>> = {
   system: '管理调度、日志、端口等系统级参数。',
   agent: '管理 Agent 模式、策略与多 Agent 编排配置。',
   backtest: '管理回测开关、评估窗口和引擎参数。',
+  recommendation: '管理股票推荐评分权重与参数。',
   uncategorized: '其他未归类的配置项。',
 };
 
@@ -71,6 +73,20 @@ const fieldTitleMap: Record<string, string> = {
   BACKTEST_MIN_AGE_DAYS: '回测最小历史天数',
   BACKTEST_ENGINE_VERSION: '回测引擎版本',
   BACKTEST_NEUTRAL_BAND_PCT: '回测中性区间阈值（%）',
+  RECOMMEND_WEIGHT_TECHNICAL: '技术面权重',
+  RECOMMEND_WEIGHT_FUNDAMENTAL: '基本面权重',
+  RECOMMEND_WEIGHT_SENTIMENT: '情绪面权重',
+  RECOMMEND_WEIGHT_MACRO: '宏观面权重',
+  RECOMMEND_WEIGHT_RISK: '风险面权重',
+  RECOMMEND_REFRESH_SKIP_SECONDS: '刷新跳过时间（秒）',
+  RECOMMEND_SECTOR_TOP_N: '板块候选数量',
+  RECOMMEND_TOP_N_PER_SECTOR: '板块最终推荐数',
+  RECOMMEND_MAX_UNIVERSE: '最大候选池',
+  RECOMMEND_SCORE_THRESHOLD_AI: 'AI 介入阈值',
+  RECOMMEND_REFRESH_MARKET: '刷新市场',
+  RECOMMEND_REFRESH_SECTOR: '刷新板块',
+  RECOMMEND_AUTO_REFRESH: '启用自动刷新',
+  RECOMMEND_REFRESH_TIME: '自动刷新时间',
 };
 
 const fieldDescriptionMap: Record<string, string> = {
@@ -122,6 +138,20 @@ const fieldDescriptionMap: Record<string, string> = {
   BACKTEST_MIN_AGE_DAYS: '仅回测早于该天数的分析记录。',
   BACKTEST_ENGINE_VERSION: '回测引擎版本标识，用于区分结果版本。',
   BACKTEST_NEUTRAL_BAND_PCT: '中性区间阈值百分比，例如 2 表示 -2%~+2%。',
+  RECOMMEND_WEIGHT_TECHNICAL: '推荐评分中技术面分析的权重。',
+  RECOMMEND_WEIGHT_FUNDAMENTAL: '推荐评分中基本面分析的权重。',
+  RECOMMEND_WEIGHT_SENTIMENT: '推荐评分中情绪面分析的权重。',
+  RECOMMEND_WEIGHT_MACRO: '推荐评分中宏观环境分析的权重。',
+  RECOMMEND_WEIGHT_RISK: '推荐评分中风险维度的权重。',
+  RECOMMEND_REFRESH_SKIP_SECONDS: '在此时间内更新过的推荐记录将跳过刷新。',
+  RECOMMEND_SECTOR_TOP_N: '每个板块扫描时选出的最大候选股票数量。',
+  RECOMMEND_TOP_N_PER_SECTOR: '深度分析前每个板块保留的最高分股票数量。',
+  RECOMMEND_MAX_UNIVERSE: '应用排名过滤前，每个板块考虑的最大股票数量。',
+  RECOMMEND_SCORE_THRESHOLD_AI: '触发 AI 深度分析所需的最低综合评分。',
+  RECOMMEND_REFRESH_MARKET: '定时推荐刷新使用的市场过滤条件（如 CN, HK, US）。',
+  RECOMMEND_REFRESH_SECTOR: '定时推荐刷新使用的板块过滤条件。',
+  RECOMMEND_AUTO_REFRESH: '启用服务模式下的每日自动推荐刷新。',
+  RECOMMEND_REFRESH_TIME: '每日自动推荐刷新的时间，格式为 HH:MM (CST)。',
 };
 
 export function getCategoryTitleZh(category: SystemConfigCategory, fallback?: string): string {

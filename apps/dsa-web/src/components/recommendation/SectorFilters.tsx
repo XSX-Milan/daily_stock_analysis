@@ -31,10 +31,10 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
     <div className="flex flex-col gap-2" data-testid="sector-filters">
       <div className="flex items-center justify-between">
         <h3 className="text-[11px] uppercase tracking-[0.2em] font-semibold text-purple-400">
-          SECTOR FILTERS
+          板块过滤
         </h3>
         <span className="text-xs text-secondary">
-          {sectorCount} sectors
+          {sectorCount} 个板块
         </span>
       </div>
       
@@ -49,7 +49,7 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
           }`}
           data-testid="sector-tag-All"
         >
-          All ({totalCount})
+          全部 ({totalCount})
         </button>
         
         {sectors.map((sector) => {

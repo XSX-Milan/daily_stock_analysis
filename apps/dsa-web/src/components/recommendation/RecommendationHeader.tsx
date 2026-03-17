@@ -19,13 +19,13 @@ export const RecommendationHeader: React.FC<RecommendationHeaderProps> = ({
     >
       <div className="flex flex-col gap-1">
         <span className="text-[11px] uppercase tracking-[0.2em] font-semibold text-purple-400">
-          RECOMMENDATION RADAR
+          推荐雷达
         </span>
         <h1 className="text-2xl font-bold text-white">
-          Stock Recommendation Hub
+          股票推荐中心
         </h1>
         <p className="text-sm text-slate-400">
-          Ranked ideas with sector scanning and score-driven priority.
+          基于板块扫描与评分驱动的优先级排序推荐。
         </p>
       </div>
 
@@ -36,7 +36,7 @@ export const RecommendationHeader: React.FC<RecommendationHeaderProps> = ({
         isLoading={loading}
         data-testid="manual-refresh-button"
       >
-        Manual Refresh
+        推荐
       </Button>
     </div>
   );

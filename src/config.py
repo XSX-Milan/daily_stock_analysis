@@ -537,7 +537,10 @@ class Config:
     recommend_weight_sentiment: int = 20
     recommend_weight_macro: int = 15
     recommend_weight_risk: int = 10
+    recommend_refresh_skip_seconds: int = 300
     recommend_sector_top_n: int = 10
+    recommend_top_n_per_sector: int = 5
+    recommend_max_universe: int = 200
     recommend_score_threshold_ai: int = 60
     recommend_auto_refresh: bool = True
     recommend_refresh_time: str = "18:00"
@@ -953,6 +956,10 @@ class Config:
             # 未显式配置时，根据消息类型选择默认字节数
             wechat_max_bytes = 2048 if wechat_msg_type_lower == "text" else 4000
 
+        recommend_top_n_per_sector_raw = os.getenv("RECOMMEND_TOP_N_PER_SECTOR")
+        if recommend_top_n_per_sector_raw is None:
+            recommend_top_n_per_sector_raw = os.getenv("RECOMMEND_SECTOR_TOP_N", "5")
+
         return cls(
             stock_list=stock_list,
             feishu_app_id=os.getenv("FEISHU_APP_ID"),
@@ -1147,7 +1154,12 @@ class Config:
             ),
             recommend_weight_macro=int(os.getenv("RECOMMEND_WEIGHT_MACRO", "15")),
             recommend_weight_risk=int(os.getenv("RECOMMEND_WEIGHT_RISK", "10")),
+            recommend_refresh_skip_seconds=int(
+                os.getenv("RECOMMEND_REFRESH_SKIP_SECONDS", "300")
+            ),
             recommend_sector_top_n=int(os.getenv("RECOMMEND_SECTOR_TOP_N", "10")),
+            recommend_top_n_per_sector=int(recommend_top_n_per_sector_raw),
+            recommend_max_universe=int(os.getenv("RECOMMEND_MAX_UNIVERSE", "200")),
             recommend_score_threshold_ai=int(
                 os.getenv("RECOMMEND_SCORE_THRESHOLD_AI", "60")
             ),

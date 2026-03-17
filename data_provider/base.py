@@ -163,6 +163,10 @@ def _market_tag(code: str) -> str:
     return "cn"
 
 
+def detect_market_region(code: str) -> str:
+    return _market_tag((code or "").strip())
+
+
 def is_bse_code(code: str) -> bool:
     """
     Check if the code is a Beijing Stock Exchange (BSE) A-share code.

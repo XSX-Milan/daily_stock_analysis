@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from data_provider.hk_stock_utils import is_hk_stock_code
+from data_provider.base import detect_market_region as detect_market_region_base
 from data_provider.us_index_mapping import is_us_stock_code
 from src.recommendation.models import MarketRegion
 
@@ -28,7 +28,8 @@ def detect_market_region(code: str) -> MarketRegion:
     if is_us_stock_code(normalized_code):
         return MarketRegion.US
 
-    if is_hk_stock_code(normalized_code):
+    base_region = detect_market_region_base(normalized_code)
+    if base_region == "hk":
         return MarketRegion.HK
 
     return MarketRegion.CN

@@ -53,6 +53,8 @@ export interface ReportDetails {
   newsContent?: string;
   rawResult?: Record<string, unknown>;
   contextSnapshot?: Record<string, unknown>;
+  financialReport?: Record<string, unknown>;
+  dividendMetrics?: Record<string, unknown>;
 }
 
 /** 完整分析报告 */

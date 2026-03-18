@@ -12,9 +12,10 @@ Responsibilities:
 from __future__ import annotations
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 
+from src.config import get_config, resolve_news_window_days
 from src.storage import DatabaseManager
 from src.utils.data_processing import normalize_model_used, parse_json_field
 
@@ -381,7 +382,31 @@ class HistoryService:
             if item.fetched_at and start_time <= item.fetched_at <= end_time
         ]
 
-        return matched[:limit]
+        # 历史兜底链路也做发布时间硬过滤，避免旧库脏数据重新冒出。
+        cfg = get_config()
+        window_days = resolve_news_window_days(
+            news_max_age_days=getattr(cfg, "news_max_age_days", 3),
+            news_strategy_profile=getattr(cfg, "news_strategy_profile", "short"),
+        )
+        # Anchor to analysis date instead of "today" to preserve historical context.
+        anchor_date = analysis.created_at.date()
+        latest_allowed = anchor_date + timedelta(days=1)
+        earliest_allowed = anchor_date - timedelta(days=max(0, window_days - 1))
+
+        filtered = []
+        for item in matched:
+            if not item.published_date:
+                continue
+            if isinstance(item.published_date, datetime):
+                published = item.published_date.date()
+            elif isinstance(item.published_date, date):
+                published = item.published_date
+            else:
+                continue
+            if earliest_allowed <= published <= latest_allowed:
+                filtered.append(item)
+
+        return filtered[:limit]
     
     def _get_sentiment_label(self, score: int) -> str:
         """

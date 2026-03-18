@@ -16,10 +16,16 @@ ensure_litellm_stub()
 
 try:
     from api.app import create_app
-    from api.v1.endpoints.analysis import trigger_analysis
+    from api.v1.endpoints.analysis import (
+        trigger_analysis,
+        _build_analysis_report,
+        _load_sync_fundamental_sources,
+    )
 except Exception:  # pragma: no cover - optional dependency environments
     create_app = None
     trigger_analysis = None
+    _build_analysis_report = None
+    _load_sync_fundamental_sources = None
 
 from src.enums import ReportType
 from src.services.analysis_service import AnalysisService
@@ -69,6 +75,72 @@ class AnalysisApiContractTestCase(unittest.TestCase):
             result = service.analyze_stock("600519", report_type="full", query_id="q1", send_notification=False)
 
         self.assertEqual(result["report"]["meta"]["report_type"], "full")
+
+    def test_build_analysis_report_extracts_fundamental_fields_from_snapshot(self) -> None:
+        if _build_analysis_report is None:
+            self.skipTest("analysis endpoint helpers unavailable in this environment")
+
+        report = _build_analysis_report(
+            report_data={
+                "meta": {},
+                "summary": {},
+                "strategy": {},
+                "details": {"news_summary": "news"},
+            },
+            query_id="q1",
+            stock_code="600519",
+            stock_name="贵州茅台",
+            context_snapshot={
+                "enhanced_context": {
+                    "fundamental_context": {
+                        "earnings": {
+                            "data": {
+                                "financial_report": {"report_date": "2025-12-31", "revenue": 1000},
+                                "dividend": {"ttm_dividend_yield_pct": 2.5},
+                            }
+                        }
+                    }
+                }
+            },
+            fallback_fundamental_payload=None,
+        )
+
+        self.assertEqual(report.details.financial_report["report_date"], "2025-12-31")
+        self.assertEqual(report.details.dividend_metrics["ttm_dividend_yield_pct"], 2.5)
+
+    def test_load_sync_fundamental_sources_uses_query_and_code_for_fallback(self) -> None:
+        if _load_sync_fundamental_sources is None:
+            self.skipTest("analysis endpoint helpers unavailable in this environment")
+
+        mock_db = MagicMock()
+        mock_db.get_analysis_history.return_value = [SimpleNamespace(context_snapshot=None)]
+        fallback_payload = {
+            "earnings": {
+                "data": {
+                    "financial_report": {"report_date": "2025-12-31"},
+                    "dividend": {"ttm_dividend_yield_pct": 2.1},
+                }
+            }
+        }
+        mock_db.get_latest_fundamental_snapshot.return_value = fallback_payload
+
+        with patch("src.storage.DatabaseManager.get_instance", return_value=mock_db):
+            context_snapshot, fundamental_snapshot = _load_sync_fundamental_sources(
+                query_id="q_sync_001",
+                stock_code="600519",
+            )
+
+        self.assertIsNone(context_snapshot)
+        self.assertEqual(fundamental_snapshot, fallback_payload)
+        mock_db.get_analysis_history.assert_called_once_with(
+            query_id="q_sync_001",
+            code="600519",
+            limit=1,
+        )
+        mock_db.get_latest_fundamental_snapshot.assert_called_once_with(
+            query_id="q_sync_001",
+            code="600519",
+        )
 
     def test_openapi_declares_single_and_batch_async_202_payloads(self) -> None:
         if create_app is None:

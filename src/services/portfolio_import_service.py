@@ -14,7 +14,7 @@ import pandas as pd
 
 from data_provider.base import canonical_stock_code
 from src.repositories.portfolio_repo import PortfolioRepository
-from src.services.portfolio_service import PortfolioConflictError, PortfolioService
+from src.services.portfolio_service import PortfolioConflictError, PortfolioOversellError, PortfolioService
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +244,9 @@ class PortfolioImportService:
                 inserted_count += 1
             except PortfolioConflictError:
                 duplicate_count += 1
+            except PortfolioOversellError as exc:
+                failed_count += 1
+                errors.append(f"idx={i}: {exc}")
             except Exception as exc:
                 failed_count += 1
                 errors.append(f"idx={i}: {exc}")

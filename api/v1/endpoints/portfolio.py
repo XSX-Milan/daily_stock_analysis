@@ -19,6 +19,7 @@ from api.v1.schemas.portfolio import (
     PortfolioCashLedgerCreateRequest,
     PortfolioCorporateActionListResponse,
     PortfolioCorporateActionCreateRequest,
+    PortfolioDeleteResponse,
     PortfolioEventCreatedResponse,
     PortfolioFxRefreshResponse,
     PortfolioImportBrokerListResponse,
@@ -32,7 +33,11 @@ from api.v1.schemas.portfolio import (
 )
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_risk_service import PortfolioRiskService
-from src.services.portfolio_service import PortfolioConflictError, PortfolioService
+from src.services.portfolio_service import (
+    PortfolioConflictError,
+    PortfolioOversellError,
+    PortfolioService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,13 @@ def _internal_error(message: str, exc: Exception) -> HTTPException:
     return HTTPException(
         status_code=500,
         detail={"error": "internal_error", "message": f"{message}: {str(exc)}"},
+    )
+
+
+def _conflict_error(*, error: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={"error": error, "message": message},
     )
 
 
@@ -181,11 +193,10 @@ def create_trade(request: PortfolioTradeCreateRequest) -> PortfolioEventCreatedR
             note=request.note,
         )
         return PortfolioEventCreatedResponse(**data)
+    except PortfolioOversellError as exc:
+        raise _conflict_error(error="portfolio_oversell", message=str(exc))
     except PortfolioConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": "conflict", "message": str(exc)},
-        )
+        raise _conflict_error(error="conflict", message=str(exc))
     except ValueError as exc:
         raise _bad_request(exc)
     except Exception as exc:
@@ -223,6 +234,28 @@ def list_trades(
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("List trade events failed", exc)
+
+
+@router.delete(
+    "/trades/{trade_id}",
+    response_model=PortfolioDeleteResponse,
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Delete trade event",
+)
+def delete_trade(trade_id: int) -> PortfolioDeleteResponse:
+    service = PortfolioService()
+    try:
+        ok = service.delete_trade_event(trade_id)
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": f"Trade not found: {trade_id}"},
+            )
+        return PortfolioDeleteResponse(deleted=1)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _internal_error("Delete trade event failed", exc)
 
 
 @router.post(
@@ -278,6 +311,28 @@ def list_cash_ledger(
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("List cash ledger events failed", exc)
+
+
+@router.delete(
+    "/cash-ledger/{entry_id}",
+    response_model=PortfolioDeleteResponse,
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Delete cash ledger event",
+)
+def delete_cash_ledger(entry_id: int) -> PortfolioDeleteResponse:
+    service = PortfolioService()
+    try:
+        ok = service.delete_cash_ledger_event(entry_id)
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": f"Cash ledger entry not found: {entry_id}"},
+            )
+        return PortfolioDeleteResponse(deleted=1)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _internal_error("Delete cash ledger event failed", exc)
 
 
 @router.post(
@@ -338,6 +393,28 @@ def list_corporate_actions(
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("List corporate action events failed", exc)
+
+
+@router.delete(
+    "/corporate-actions/{action_id}",
+    response_model=PortfolioDeleteResponse,
+    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Delete corporate action event",
+)
+def delete_corporate_action(action_id: int) -> PortfolioDeleteResponse:
+    service = PortfolioService()
+    try:
+        ok = service.delete_corporate_action_event(action_id)
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "message": f"Corporate action not found: {action_id}"},
+            )
+        return PortfolioDeleteResponse(deleted=1)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _internal_error("Delete corporate action event failed", exc)
 
 
 @router.get(

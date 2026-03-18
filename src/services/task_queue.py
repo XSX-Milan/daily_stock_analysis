@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Set, List, Callable, Any, TYPE_CHECKING, Tuple
+from typing import Optional, Dict, List, Any, TYPE_CHECKING, Tuple, Literal
 
 if TYPE_CHECKING:
     from asyncio import Queue as AsyncQueue
@@ -166,6 +166,68 @@ class AnalysisTaskQueue:
                 thread_name_prefix="analysis_task_"
             )
         return self._executor
+
+    @property
+    def max_workers(self) -> int:
+        """Return current executor max worker setting."""
+        return self._max_workers
+
+    def _has_inflight_tasks_locked(self) -> bool:
+        """Check whether queue has any pending/processing tasks."""
+        if self._analyzing_stocks:
+            return True
+        return any(
+            task.status in (TaskStatus.PENDING, TaskStatus.PROCESSING)
+            for task in self._tasks.values()
+        )
+
+    def sync_max_workers(
+        self,
+        max_workers: int,
+        *,
+        log: bool = True,
+    ) -> Literal["applied", "unchanged", "deferred_busy"]:
+        """
+        Try to sync queue concurrency without replacing singleton instance.
+
+        Returns:
+            - "applied": new value applied immediately (idle queue only)
+            - "unchanged": target equals current value or invalid target
+            - "deferred_busy": queue is busy, apply is deferred
+        """
+        try:
+            target = max(1, int(max_workers))
+        except (TypeError, ValueError):
+            if log:
+                logger.warning("[TaskQueue] 忽略非法 MAX_WORKERS 值: %r", max_workers)
+            return "unchanged"
+
+        executor_to_shutdown: Optional[ThreadPoolExecutor] = None
+        previous: int
+        with self._data_lock:
+            previous = self._max_workers
+            if target == previous:
+                return "unchanged"
+
+            if self._has_inflight_tasks_locked():
+                if log:
+                    logger.info(
+                        "[TaskQueue] 最大并发调整延后: 当前繁忙 (%s -> %s)",
+                        previous,
+                        target,
+                    )
+                return "deferred_busy"
+
+            self._max_workers = target
+            executor_to_shutdown = self._executor
+            self._executor = None
+
+        if executor_to_shutdown is not None:
+            executor_to_shutdown.shutdown(wait=False)
+
+        if log:
+            logger.info("[TaskQueue] 最大并发已更新: %s -> %s", previous, target)
+        return "applied"
     
     # ========== 任务提交与查询 ==========
     
@@ -590,4 +652,14 @@ def get_task_queue() -> AnalysisTaskQueue:
     Returns:
         AnalysisTaskQueue 实例
     """
-    return AnalysisTaskQueue()
+    queue = AnalysisTaskQueue()
+    try:
+        from src.config import get_config
+
+        config = get_config()
+        target_workers = max(1, int(getattr(config, "max_workers", queue.max_workers)))
+        queue.sync_max_workers(target_workers, log=False)
+    except Exception as exc:
+        logger.debug("[TaskQueue] 读取 MAX_WORKERS 失败，使用当前并发设置: %s", exc)
+
+    return queue

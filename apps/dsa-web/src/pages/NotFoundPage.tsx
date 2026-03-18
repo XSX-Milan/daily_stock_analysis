@@ -1,8 +1,14 @@
 import type React from 'react';
+import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 const NotFoundPage: React.FC = () => {
   const navigate = useNavigate();
+
+  // Set page title
+  useEffect(() => {
+    document.title = '页面未找到 - DSA';
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center text-center px-4">

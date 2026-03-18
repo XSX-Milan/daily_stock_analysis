@@ -642,6 +642,7 @@ def main() -> int:
                     minimax_keys=config.minimax_api_keys,
                     searxng_base_urls=config.searxng_base_urls,
                     news_max_age_days=config.news_max_age_days,
+                    news_strategy_profile=getattr(config, "news_strategy_profile", "short"),
                 )
 
             if config.gemini_api_key or config.openai_api_key:

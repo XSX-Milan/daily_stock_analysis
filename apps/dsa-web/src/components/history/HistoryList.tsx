@@ -3,7 +3,7 @@ import { useRef, useCallback, useEffect } from 'react';
 import type { HistoryItem } from '../../types/analysis';
 import { getSentimentColor } from '../../types/analysis';
 import { formatDateTime } from '../../utils/format';
-import { Button, Badge } from '../common';
+import { Badge, Button, ScrollArea } from '../common';
 
 interface HistoryListProps {
   items: HistoryItem[];
@@ -83,9 +83,33 @@ export const HistoryList: React.FC<HistoryListProps> = ({
     }
   }, [someVisibleSelected]);
 
+  const getOperationBadgeLabel = (advice?: string) => {
+    const normalized = advice?.trim();
+    if (!normalized) {
+      return '情绪';
+    }
+    if (normalized.includes('减仓')) {
+      return '减仓';
+    }
+    if (normalized.includes('卖')) {
+      return '卖出';
+    }
+    if (normalized.includes('观望') || normalized.includes('等待')) {
+      return '观望';
+    }
+    if (normalized.includes('买') || normalized.includes('布局')) {
+      return '买入';
+    }
+    return normalized.split(/[，。；、\s]/)[0] || '建议';
+  };
+
   return (
     <aside className={`glass-card overflow-hidden flex flex-col ${className}`}>
-      <div ref={scrollContainerRef} className="p-4 flex-1 overflow-y-auto">
+      <ScrollArea
+        viewportRef={scrollContainerRef}
+        viewportClassName="p-4"
+        testId="home-history-list-scroll"
+      >
         <div className="mb-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-xs font-semibold text-purple uppercase tracking-widest flex items-center gap-2">
@@ -121,7 +145,7 @@ export const HistoryList: React.FC<HistoryListProps> = ({
                 onClick={onDeleteSelected}
                 disabled={selectedCount === 0 || isDeleting}
                 isLoading={isDeleting}
-                className="h-7 text-[11px] px-3"
+                className="h-6 text-[9px] px-2"
               >
                 {isDeleting ? '删除中' : '删除'}
               </Button>
@@ -134,19 +158,22 @@ export const HistoryList: React.FC<HistoryListProps> = ({
             <div className="w-6 h-6 border-2 border-cyan/10 border-t-cyan rounded-full animate-spin" />
           </div>
         ) : items.length === 0 ? (
-          <div className="text-center py-10 space-y-2">
-            <div className="mx-auto w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-muted-text/30">
+          <div className="text-center py-12 space-y-3">
+            <div className="mx-auto w-11 h-11 rounded-full bg-white/5 flex items-center justify-center text-muted-text/30">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
-            <p className="text-muted-text text-xs">暂无历史分析记录</p>
+            <div className="space-y-1">
+              <p className="text-sm text-secondary-text">暂无历史分析记录</p>
+              <p className="text-xs text-muted-text">完成首次分析后，这里会保留最近结果。</p>
+            </div>
           </div>
         ) : (
           <div className="space-y-2">
             {items.map((item) => (
               <div key={item.id} className="flex items-start gap-2 group">
-                <div className="pt-3">
+                <div className="pt-5">
                   <input
                     type="checkbox"
                     checked={selectedIds.has(item.id)}
@@ -160,7 +187,7 @@ export const HistoryList: React.FC<HistoryListProps> = ({
                   onClick={() => onItemClick(item.id)}
                   className={`flex-1 text-left p-2.5 rounded-xl transition-all duration-200 border relative overflow-hidden group/item ${
                     selectedId === item.id 
-                      ? 'bg-purple/10 border-purple/30 border-cyan shadow-[0_0_15px_rgba(111,97,241,0.15)]' 
+                      ? 'bg-purple/10 border-purple/30 border-cyan shadow-[0_0_15px_rgba(111,97,241,0.15)]'
                       : 'bg-white/5 border-transparent hover:bg-white/10 hover:border-white/10'
                   }`}
                 >
@@ -178,20 +205,22 @@ export const HistoryList: React.FC<HistoryListProps> = ({
                       />
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold text-white truncate text-sm tracking-tight">
-                          {item.stockName || item.stockCode}
-                        </span>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <span className="truncate text-sm font-semibold text-white tracking-tight">
+                            {item.stockName || item.stockCode}
+                          </span>
+                        </div>
                         {item.sentimentScore !== undefined && (
                           <span 
-                            className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full border"
+                            className="shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold leading-none"
                             style={{ 
                               color: getSentimentColor(item.sentimentScore),
                               borderColor: `${getSentimentColor(item.sentimentScore)}30`,
                               backgroundColor: `${getSentimentColor(item.sentimentScore)}10`
                             }}
                           >
-                            {item.sentimentScore}
+                            {getOperationBadgeLabel(item.operationAdvice)} {item.sentimentScore}
                           </span>
                         )}
                       </div>
@@ -219,14 +248,14 @@ export const HistoryList: React.FC<HistoryListProps> = ({
             )}
 
             {!hasMore && items.length > 0 && (
-              <div className="text-center py-4">
+              <div className="text-center py-5">
                 <div className="h-px bg-white/5 w-full mb-3" />
-                <span className="text-[10px] text-muted-text/30 uppercase tracking-widest">End of History</span>
+                <span className="text-[10px] text-muted-text/50 uppercase tracking-[0.2em]">已到底部</span>
               </div>
             )}
           </div>
         )}
-      </div>
+      </ScrollArea>
     </aside>
   );
 };

@@ -53,7 +53,7 @@ function boolIcon(value?: boolean | null) {
 // ============ Metric Row ============
 
 const MetricRow: React.FC<{ label: string; value: string; accent?: boolean }> = ({ label, value, accent }) => (
-  <div className="flex items-center justify-between py-1.5 border-b border-white/5 last:border-0">
+  <div className="flex items-center justify-between border-b border-white/5 py-1.5 last:border-0">
     <span className="text-xs text-secondary-text">{label}</span>
     <span className={`text-sm font-mono font-semibold ${accent ? 'text-cyan' : 'text-white'}`}>{value}</span>
   </div>
@@ -73,7 +73,7 @@ const PerformanceCard: React.FC<{ metrics: PerformanceMetrics; title: string }> 
     <MetricRow label="SL Trigger Rate" value={pct(metrics.stopLossTriggerRate)} />
     <MetricRow label="TP Trigger Rate" value={pct(metrics.takeProfitTriggerRate)} />
     <MetricRow label="Avg Days to Hit" value={metrics.avgDaysToFirstHit != null ? metrics.avgDaysToFirstHit.toFixed(1) : '--'} />
-    <div className="mt-3 pt-2 border-t border-white/5 flex items-center justify-between">
+    <div className="mt-3 pt-2 border-t border-border/40 flex items-center justify-between">
       <span className="text-xs text-muted-text">Evaluations</span>
       <span className="text-xs text-secondary-text font-mono">
         {Number(metrics.completedCount)} / {Number(metrics.totalEvaluations)}
@@ -95,7 +95,7 @@ const PerformanceCard: React.FC<{ metrics: PerformanceMetrics; title: string }> 
 // ============ Run Summary ============
 
 const RunSummary: React.FC<{ data: BacktestRunResponse }> = ({ data }) => (
-  <div className="flex items-center gap-4 px-3 py-2 rounded-lg bg-elevated border border-white/5 text-xs font-mono animate-fade-in">
+  <div className="flex items-center gap-4 rounded-lg border border-white/5 bg-elevated px-3 py-2 text-xs font-mono animate-fade-in">
     <span className="text-secondary-text">Processed: <span className="text-white">{data.processed}</span></span>
     <span className="text-secondary-text">Saved: <span className="text-cyan">{data.saved}</span></span>
     <span className="text-secondary-text">Completed: <span className="text-emerald-400">{data.completed}</span></span>
@@ -109,6 +109,11 @@ const RunSummary: React.FC<{ data: BacktestRunResponse }> = ({ data }) => (
 // ============ Main Page ============
 
 const BacktestPage: React.FC = () => {
+  // Set page title
+  useEffect(() => {
+    document.title = '策略回测 - DSA';
+  }, []);
+
   // Input state
   const [codeFilter, setCodeFilter] = useState('');
   const [evalDays, setEvalDays] = useState('');
@@ -233,11 +238,11 @@ const BacktestPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-full flex flex-col rounded-[1.5rem] bg-transparent">
       {/* Header */}
-      <header className="flex-shrink-0 px-4 py-3 border-b border-white/5">
-        <div className="flex items-center gap-2 max-w-4xl">
-          <div className="flex-1 relative">
+      <header className="flex-shrink-0 border-b border-white/5 px-3 py-3 sm:px-4">
+        <div className="flex max-w-5xl flex-wrap items-center gap-2">
+          <div className="relative min-w-0 flex-[1_1_220px]">
             <input
               type="text"
               value={codeFilter}
@@ -285,7 +290,7 @@ const BacktestPage: React.FC = () => {
           >
             <span className={`
               inline-block w-1.5 h-1.5 rounded-full transition-colors duration-200
-              ${forceRerun ? 'bg-cyan shadow-[0_0_4px_rgba(0,212,255,0.6)]' : 'bg-white/20'}
+              ${forceRerun ? 'bg-cyan shadow-[0_0_4px_rgba(0,212,255,0.6)]' : 'bg-border'}
             `} />
             Force
           </button>
@@ -319,9 +324,9 @@ const BacktestPage: React.FC = () => {
       </header>
 
       {/* Main content */}
-      <main className="flex-1 flex overflow-hidden p-3 gap-3">
+      <main className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 lg:flex-row">
         {/* Left sidebar - Performance */}
-        <div className="flex flex-col gap-3 w-64 flex-shrink-0 overflow-y-auto">
+        <div className="flex max-h-[38vh] flex-col gap-3 overflow-y-auto lg:max-h-none lg:w-60 lg:flex-shrink-0">
           {isLoadingPerf ? (
             <div className="flex items-center justify-center py-8">
               <div className="w-8 h-8 border-2 border-cyan/20 border-t-cyan rounded-full animate-spin" />
@@ -342,7 +347,7 @@ const BacktestPage: React.FC = () => {
         </div>
 
         {/* Right content - Results table */}
-        <section className="flex-1 overflow-y-auto">
+        <section className="min-h-0 flex-1 overflow-y-auto">
           {pageError ? (
             <ApiErrorAlert error={pageError} className="mb-3" />
           ) : null}
@@ -358,14 +363,14 @@ const BacktestPage: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                 </svg>
               </div>
-              <h3 className="text-base font-medium text-white mb-1.5">No Results</h3>
+              <h3 className="text-base font-medium text-foreground mb-1.5">No Results</h3>
               <p className="text-xs text-muted-text max-w-xs">
                 Run a backtest to evaluate historical analysis accuracy
               </p>
             </div>
           ) : (
             <div className="animate-fade-in">
-              <div className="overflow-x-auto rounded-xl border border-white/5">
+              <div className="overflow-x-auto rounded-xl border border-white/6 bg-card/72">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-elevated text-left">
@@ -384,11 +389,11 @@ const BacktestPage: React.FC = () => {
                     {results.map((row) => (
                       <tr
                         key={row.analysisHistoryId}
-                        className="border-t border-white/5 hover:bg-hover transition-colors"
+                        className="border-t border-white/5 transition-colors hover:bg-hover"
                       >
                         <td className="px-3 py-2 font-mono text-cyan text-xs">{row.code}</td>
                         <td className="px-3 py-2 text-xs text-secondary-text">{row.analysisDate || '--'}</td>
-                        <td className="px-3 py-2 text-xs text-white truncate max-w-[140px]" title={row.operationAdvice || ''}>
+                        <td className="px-3 py-2 text-xs text-foreground truncate max-w-[140px]" title={row.operationAdvice || ''}>
                           {row.operationAdvice || '--'}
                         </td>
                         <td className="px-3 py-2 text-xs">

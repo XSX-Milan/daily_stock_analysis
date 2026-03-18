@@ -228,12 +228,10 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["resolved_protocol"], "openai")
         self.assertEqual(payload["resolved_model"], "openai/deepseek-chat")
 
-    @patch("src.agent.tools.data_tools.reset_fetcher_manager")
-    @patch("src.search_service.reset_search_service")
+    @patch.object(SystemConfigService, "_reload_runtime_singletons")
     def test_update_with_reload_resets_runtime_singletons(
         self,
-        mock_reset_search_service,
-        mock_reset_fetcher_manager,
+        mock_reload_runtime_singletons,
     ) -> None:
         response = self.service.update(
             config_version=self.manager.get_config_version(),
@@ -242,8 +240,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         )
 
         self.assertTrue(response["success"])
-        mock_reset_search_service.assert_called_once()
-        mock_reset_fetcher_manager.assert_called_once()
+        mock_reload_runtime_singletons.assert_called_once()
 
     def test_update_raises_conflict_for_stale_version(self) -> None:
         with self.assertRaises(ConfigConflictError):
@@ -252,6 +249,33 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 items=[{"key": "STOCK_LIST", "value": "600519"}],
                 reload_now=False,
             )
+
+    def test_update_appends_news_window_explainability_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "NEWS_STRATEGY_PROFILE", "value": "ultra_short"},
+                {"key": "NEWS_MAX_AGE_DAYS", "value": "7"},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        joined = " | ".join(response["warnings"])
+        self.assertIn("effective_days=1", joined)
+        self.assertIn("min(profile_days, NEWS_MAX_AGE_DAYS)", joined)
+
+    def test_update_appends_max_workers_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[{"key": "MAX_WORKERS", "value": "1"}],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        joined = " | ".join(response["warnings"])
+        self.assertIn("MAX_WORKERS=1", joined)
+        self.assertIn("reload_now=false", joined)
 
 
     def test_validate_rejects_comma_only_api_key(self) -> None:

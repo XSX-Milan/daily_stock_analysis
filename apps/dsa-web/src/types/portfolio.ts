@@ -178,6 +178,10 @@ export interface PortfolioEventCreatedResponse {
   id: number;
 }
 
+export interface PortfolioDeleteResponse {
+  deleted: number;
+}
+
 export interface PortfolioTradeListItem {
   id: number;
   accountId: number;

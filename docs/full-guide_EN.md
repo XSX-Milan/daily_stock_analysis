@@ -215,9 +215,36 @@ Default schedule: Every weekday at **18:00 (Beijing Time)** automatic execution.
 
 ### Data Source Configuration
 
-| Variable | Description | Required |
-|--------|------|:----:|
-| `TUSHARE_TOKEN` | Tushare Pro Token | Optional |
+| Variable | Description | Default | Required |
+|--------|------|--------|:----:|
+| `TUSHARE_TOKEN` | Tushare Pro Token | - | Optional |
+| `ENABLE_REALTIME_QUOTE` | Enable real-time quotes (if disabled, uses historical closing prices for analysis) | `true` | Optional |
+| `ENABLE_REALTIME_TECHNICAL_INDICATORS` | Intraday real-time technicals: Calculate MA5/MA10/MA20 and bull trends using real-time prices when enabled (Issue #234); uses yesterday's close if disabled. | `true` | Optional |
+| `ENABLE_CHIP_DISTRIBUTION` | Enable chip distribution analysis (this API is unstable, recommended to disable for cloud deployment). GitHub Actions users must set `ENABLE_CHIP_DISTRIBUTION=true` in Repository Variables to enable; disabled by default in workflows. | `true` | Optional |
+| `ENABLE_EASTMONEY_PATCH` | Eastmoney API patch: Recommended to set to `true` when Eastmoney APIs fail frequently (e.g., RemoteDisconnected, connection closed). Injects NID tokens and random User-Agents to reduce rate limiting probability. | `false` | Optional |
+| `REALTIME_SOURCE_PRIORITY` | Real-time quote source priority (comma-separated), e.g., `tencent,akshare_sina,efinance,akshare_em` | See .env.example | Optional |
+| `ENABLE_FUNDAMENTAL_PIPELINE` | Master switch for fundamental aggregation; when disabled, returns `not_supported` block only, without altering the original analysis pipeline. | `true` | Optional |
+| `FUNDAMENTAL_STAGE_TIMEOUT_SECONDS` | Total latency budget for the fundamental stage (seconds) | `1.5` | Optional |
+| `FUNDAMENTAL_FETCH_TIMEOUT_SECONDS` | Timeout for a single capability source call (seconds) | `0.8` | Optional |
+| `FUNDAMENTAL_RETRY_MAX` | Retry count for fundamental capabilities (including the first attempt) | `1` | Optional |
+| `FUNDAMENTAL_CACHE_TTL_SECONDS` | Fundamental aggregation cache TTL (seconds), short cache to reduce repeated API pulling. | `120` | Optional |
+| `FUNDAMENTAL_CACHE_MAX_ENTRIES` | Maximum entries for fundamental cache (evicted by time within TTL) | `256` | Optional |
+
+> **Behavior Notes:**
+> - **A-shares**: Returns aggregated capabilities by `valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards`.
+> - **ETFs**: Returns available items, marks missing capabilities as `not_supported`, and does not affect the original flow overall.
+> - **US/HK stocks**: Returns `not_supported` fallback block.
+> - Any exception uses fail-open logic, only logs errors without affecting the main technical/news/chip pipeline.
+> - **Field contracts**:
+>   - `fundamental_context.boards.data` = `sector_rankings` (sector rise/fall leaderboard, structure `{top, bottom}`);
+>   - `get_stock_info.belong_boards` = list of sectors the individual stock belongs to;
+>   - `get_stock_info.boards` is a compatibility alias, value is identical to `belong_boards` (removal considered only in major version updates);
+>   - `get_stock_info.sector_rankings` stays consistent with `fundamental_context.boards.data`.
+> - **Sector leaderboard** uses a fixed fallback order: consistent with global priority.
+> - **Timeout control** is a `best-effort` soft timeout: the stage will quickly degrade and continue execution based on the budget, but does not guarantee a hard interrupt of underlying third-party network calls.
+> - `FUNDAMENTAL_STAGE_TIMEOUT_SECONDS=1.5` indicates the target budget for the newly added fundamental stage, not a strict hard SLA.
+> - For a hard SLA, please upgrade to isolated child process execution in future versions to forcefully terminate timeout tasks.
+
 
 ### Other Configuration
 

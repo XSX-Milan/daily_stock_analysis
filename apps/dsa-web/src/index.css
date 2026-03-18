@@ -4,38 +4,6 @@
    1. THEME VARIABLES (Base/Classic)
    ========================================= */
 :root {
-  /* Primary brand tones */
-  --color-cyan: #00d4ff;
-  --color-cyan-dim: #00a8cc;
-  --color-cyan-glow: rgba(0, 212, 255, 0.4);
-
-  /* Secondary accent tones */
-  --color-purple: #6f61f1;
-  --color-purple-dim: #5a4ed4;
-  --color-purple-glow: rgba(168, 85, 247, 0.3);
-
-  /* Status colors */
-  --color-success: #00ff88;
-  --color-warning: #ffaa00;
-  --color-danger: #ff4466;
-
-  /* Dark surface colors */
-  --bg-base: #08080c;
-  --bg-card: #0d0d14;
-  --bg-elevated: #12121a;
-  --bg-hover: #1a1a24;
-
-  /* Border colors */
-  --border-dim: rgba(255, 255, 255, 0.06);
-  --border-default: rgba(255, 255, 255, 0.1);
-  --border-accent: rgba(0, 212, 255, 0.3);
-  --border-purple: rgba(168, 85, 247, 0.28);
-  --border-cyan: #00d4ff;
-  /* Text colors */
-  --text-primary: #ffffff;
-  --text-secondary-text: #a0a0b0;
-  --text-muted-text: #606070;
-
   /* Typography */
   font-family:
     "Inter",
@@ -53,6 +21,87 @@
 
   /* HSL tokens used by Tailwind-based components */
 
+  --background: 216 33% 97%;
+  --foreground: 228 35% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 228 35% 12%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 228 35% 12%;
+  --primary: 193 100% 43%;
+  --primary-foreground: 216 33% 97%;
+  --secondary: 214 32% 91%;
+  --secondary-foreground: 228 35% 16%;
+  --muted: 214 30% 94%;
+  --muted-foreground: 224 12% 42%;
+  --accent: 214 32% 93%;
+  --accent-foreground: 228 35% 16%;
+  --destructive: 349 82% 56%;
+  --destructive-foreground: 210 33% 98%;
+  --border: 217 28% 84%;
+  --input: 217 28% 84%;
+  --ring: 193 100% 43%;
+  --radius: 1rem;
+  --elevated: 0 0% 100%;
+  --hover: 214 29% 90%;
+  --secondary-text: 224 14% 34%;
+  --muted-text: 224 10% 48%;
+
+  --color-cyan: hsl(var(--primary));
+  --color-cyan-dim: hsl(var(--primary) / 0.8);
+  --color-cyan-glow: rgba(0, 168, 204, 0.18);
+  --color-purple: #6f61f1;
+  --color-purple-dim: #5a4ed4;
+  --color-purple-glow: rgba(111, 97, 241, 0.18);
+  --color-success: #00b86b;
+  --color-warning: #b7791f;
+  --color-danger: #e11d48;
+  --bg-base: hsl(var(--background));
+  --bg-card: hsl(var(--card));
+  --bg-elevated: hsl(var(--elevated));
+  --bg-hover: hsl(var(--hover));
+  --border-dim: hsl(var(--border) / 0.55);
+  --border-default: hsl(var(--border) / 0.82);
+  --border-accent: hsl(var(--primary) / 0.38);
+  --border-purple: rgba(111, 97, 241, 0.24);
+  --border-cyan: hsl(var(--primary));
+  --text-primary: hsl(var(--foreground));
+  --text-secondary-text: hsl(var(--secondary-text));
+  --text-muted-text: hsl(var(--muted-text));
+  --nav-active-bg: rgba(0, 168, 204, 0.09);
+  --nav-active-border: rgba(0, 168, 204, 0.24);
+  --nav-active-shadow: rgba(0, 168, 204, 0.04);
+  --nav-hover-bg: rgba(0, 168, 204, 0.05);
+  --nav-icon-active: #00a8cc;
+  --nav-item-height: 2.75rem;
+  --nav-item-padding-x: 1rem;
+  --nav-indicator-width: 0.25rem;
+  --nav-indicator-bg: #00a8cc;
+  --nav-indicator-shadow: rgba(0, 168, 204, 0.52);
+  --nav-badge-bg: #00a8cc;
+  --nav-brand-shadow: rgba(0, 168, 204, 0.2);
+  --home-loading-ring-track: rgba(0, 168, 204, 0.2);
+  --home-loading-ring-head: #00a8cc;
+  --home-mobile-overlay-bg: rgba(0, 0, 0, 0.6);
+  --home-action-ai-bg: rgba(0, 168, 204, 0.1);
+  --home-action-ai-border: rgba(0, 168, 204, 0.2);
+  --home-action-ai-text: #00a8cc;
+  --home-action-ai-hover-bg: rgba(0, 168, 204, 0.18);
+  --home-action-report-bg: rgba(111, 97, 241, 0.1);
+  --home-action-report-border: rgba(111, 97, 241, 0.2);
+  --home-action-report-text: #6f61f1;
+  --home-action-report-hover-bg: rgba(111, 97, 241, 0.18);
+  --shadow-soft-card: 0 18px 48px rgba(15, 23, 42, 0.08);
+  --shadow-soft-card-strong: 0 24px 56px rgba(15, 23, 42, 0.12);
+  --input-surface-bg: var(--bg-card);
+  --input-surface-border: hsl(var(--border) / 0.82);
+  --input-surface-border-hover: rgba(255, 255, 255, 0.18);
+  --input-surface-border-focus: hsl(var(--primary) / 0.38);
+  --input-surface-focus-ring: 0 0 0 4px hsl(var(--primary) / 0.15);
+  --gradient-primary:
+    linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary) / 0.74));
+}
+
+.dark {
   --background: 228 35% 7%;
   --foreground: 210 33% 98%;
   --card: 230 24% 10%;
@@ -72,11 +121,62 @@
   --border: 226 19% 20%;
   --input: 226 19% 20%;
   --ring: 190 100% 50%;
-  --radius: 1rem;
   --elevated: 230 22% 12%;
   --hover: 231 20% 16%;
   --secondary-text: 228 16% 72%;
   --muted-text: 228 10% 48%;
+
+  --color-cyan: #00d4ff;
+  --color-cyan-dim: #00a8cc;
+  --color-cyan-glow: rgba(0, 212, 255, 0.4);
+  --color-purple-glow: rgba(111, 97, 241, 0.3);
+  --color-success: #00ff88;
+  --color-warning: #ffaa00;
+  --color-danger: #ff4466;
+  --bg-base: #08080c;
+  --bg-card: #0d0d14;
+  --bg-elevated: #12121a;
+  --bg-hover: #1a1a24;
+  --border-dim: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.1);
+  --border-accent: rgba(0, 212, 255, 0.3);
+  --border-purple: rgba(168, 85, 247, 0.28);
+  --border-cyan: #00d4ff;
+  --text-primary: #ffffff;
+  --text-secondary-text: #a0a0b0;
+  --text-muted-text: #606070;
+  --nav-active-bg: rgba(0, 212, 255, 0.11);
+  --nav-active-border: rgba(0, 212, 255, 0.3);
+  --nav-active-shadow: rgba(0, 212, 255, 0.05);
+  --nav-hover-bg: rgba(0, 212, 255, 0.06);
+  --nav-icon-active: #00d4ff;
+  --nav-item-height: 2.75rem;
+  --nav-item-padding-x: 1rem;
+  --nav-indicator-width: 0.25rem;
+  --nav-indicator-bg: #00d4ff;
+  --nav-indicator-shadow: rgba(0, 212, 255, 0.8);
+  --nav-badge-bg: #00d4ff;
+  --nav-brand-shadow: rgba(0, 212, 255, 0.24);
+  --home-loading-ring-track: rgba(0, 212, 255, 0.2);
+  --home-loading-ring-head: #00d4ff;
+  --home-mobile-overlay-bg: rgba(0, 0, 0, 0.6);
+  --home-action-ai-bg: rgba(0, 212, 255, 0.1);
+  --home-action-ai-border: rgba(0, 212, 255, 0.2);
+  --home-action-ai-text: #00d4ff;
+  --home-action-ai-hover-bg: rgba(0, 212, 255, 0.2);
+  --home-action-report-bg: rgba(111, 97, 241, 0.1);
+  --home-action-report-border: rgba(111, 97, 241, 0.2);
+  --home-action-report-text: #8a7dff;
+  --home-action-report-hover-bg: rgba(111, 97, 241, 0.2);
+  --shadow-soft-card: 0 18px 48px rgba(3, 8, 20, 0.18);
+  --shadow-soft-card-strong: 0 24px 56px rgba(3, 8, 20, 0.26);
+  --input-surface-bg: var(--bg-card);
+  --input-surface-border: hsl(var(--border) / 0.82);
+  --input-surface-border-hover: rgba(255, 255, 255, 0.18);
+  --input-surface-border-focus: hsl(var(--primary) / 0.45);
+  --input-surface-focus-ring: 0 0 0 4px hsl(var(--primary) / 0.18);
+  --gradient-primary:
+    linear-gradient(135deg, rgba(0, 212, 255, 0.96), rgba(0, 168, 204, 0.96));
 }
 
 /* =========================================
@@ -90,125 +190,8 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: var(--bg-base);
-  color: var(--text-primary);
-}
-
-/* ============ Floating Dock Navigation ============ */
-.dock-nav {
-  position: fixed;
-  left: 24px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 60;
-  pointer-events: none;
-}
-
-.dock-surface {
-  pointer-events: auto;
-  width: 72px;
-  padding: 14px 10px;
-  border-radius: 26px;
-  /* Use a darker translucent surface to reduce contrast jumps. */
-  background: rgba(18, 18, 26, 0.6);
-  /* Keep the border subtle. */
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  /* Soften the shadow stack. */
-  box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  position: relative;
-}
-
-.dock-surface::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  /* Use a more restrained border gradient. */
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.1) 0%,
-    rgba(255, 255, 255, 0.05) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-  opacity: 0.5;
-}
-
-/* Keep the top highlight, but tone it down. */
-.dock-surface::after {
-  content: "";
-  position: absolute;
-  top: 10px;
-  left: 12px;
-  right: 12px;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.15),
-    transparent
-  );
-  pointer-events: none;
-  opacity: 0.4;
-}
-
-.dock-logo {
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* Fine-tuned logo gradient. */
-  background: linear-gradient(
-    135deg,
-    rgba(51, 110, 168, 0.45) 0%,
-    #367db5 100%
-  );
-  color: #04141d;
-  text-decoration: none;
-  box-shadow: 0 8px 16px rgba(0, 212, 255, 0.25);
-  transition:
-    transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1),
-    box-shadow 0.2s ease;
-}
-
-.dock-logo:hover {
-  transform: scale(1.05);
-  box-shadow: 0 10px 20px rgba(0, 212, 255, 0.35);
-}
-
-.dock-items {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  width: 100%;
-}
-
-.dock-footer {
-  margin-top: auto;
-}
-
-.dock-safe-area {
-  padding-left: 120px;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
 }
 
 /* ============ Title Styles ============ */
@@ -266,6 +249,37 @@ body {
 
 .input-terminal:hover:not(:focus) {
   border-color: rgba(255, 255, 255, 0.15);
+}
+
+.input-surface {
+  background: var(--input-surface-bg);
+  border-color: var(--input-surface-border);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-soft-card);
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.input-surface::placeholder {
+  color: var(--text-muted-text);
+}
+
+.input-surface:hover:not(:focus):not(:disabled) {
+  border-color: var(--input-surface-border-hover);
+}
+
+.input-surface:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.input-focus-glow:focus,
+.input-focus-glow:focus-within {
+  border-color: var(--input-surface-border-focus);
+  box-shadow: var(--shadow-soft-card), var(--input-surface-focus-ring);
 }
 
 /* ============ Badge Styles ============ */
@@ -514,34 +528,6 @@ body {
 }
 
 /* ============ Responsive ============ */
-@media (max-width: 768px) {
-  .dock-nav {
-    left: 12px;
-  }
-
-  .dock-surface {
-    width: 60px;
-    padding: 10px 8px;
-    border-radius: 22px;
-  }
-
-  .dock-logo {
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
-  }
-
-  .dock-item {
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
-  }
-
-  .dock-safe-area {
-    padding-left: 88px;
-  }
-}
-
 /* =========================================
    4. NEW UI COMPONENT UTILITIES (from Terminal PR)
    ========================================= */
@@ -678,115 +664,6 @@ textarea {
   );
   pointer-events: none;
 }
-
-
-
-
-.dock-item {
-  position: relative;
-  display: inline-flex;
-  height: 46px;
-  width: 46px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-muted-text);
-  cursor: pointer;
-  overflow: hidden;
-  text-decoration: none;
-  transition: all 0.22s ease;
-}
-
-.dock-item::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(
-    135deg,
-    rgba(0, 212, 255, 0.12),
-    rgba(111, 97, 241, 0.08)
-  );
-  opacity: 0;
-  transition: opacity 0.22s ease;
-}
-
-.dock-item::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 50%;
-  height: 40%;
-  width: 60%;
-  transform: translateX(-50%) translateY(100%);
-  background: radial-gradient(circle, rgba(0, 212, 255, 0.4), transparent 70%);
-  filter: blur(8px);
-  opacity: 0;
-  transition: all 0.22s ease;
-}
-
-.dock-item:hover {
-  transform: translateY(-1px);
-  border-color: rgba(0, 212, 255, 0.22);
-  background: rgba(0, 212, 255, 0.08);
-  color: var(--text-primary);
-}
-
-.dock-item:hover::before {
-  opacity: 1;
-}
-
-.dock-item:hover::after {
-  opacity: 0.6;
-  transform: translateX(-50%) translateY(40%);
-}
-
-.dock-item.is-active {
-  border-color: rgba(0, 212, 255, 0.24);
-  background: linear-gradient(
-    135deg,
-    rgba(0, 212, 255, 0.2),
-    rgba(111, 97, 241, 0.16)
-  );
-  color: #fff;
-  box-shadow:
-    0 0 0 1px rgba(0, 212, 255, 0.1),
-    0 14px 32px rgba(0, 212, 255, 0.14);
-}
-
-.dock-item.is-active:hover {
-  transform: scale(1.05);
-}
-
-.dock-item.is-active::after,
-.dock-item.is-active::before {
-  opacity: 0 !important;
-}
-
-.dock-item.is-placeholder,
-.dock-item[disabled] {
-  color: var(--text-muted-text);
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.dock-item.is-placeholder:hover,
-.dock-item[disabled]:hover {
-  transform: none;
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-muted-text);
-}
-
-.dock-item.is-placeholder:hover::before,
-.dock-item.is-placeholder:hover::after,
-.dock-item[disabled]:hover::before,
-.dock-item[disabled]:hover::after {
-  opacity: 0;
-}
-
 .label-uppercase {
   display: inline-flex;
   align-items: center;
@@ -858,10 +735,53 @@ textarea {
   background: var(--bg-hover);
 }
 
-@media (max-width: 768px) {
-  .dock-item {
-    width: 42px;
-    height: 42px;
-    border-radius: 12px;
+.bg-primary-gradient {
+  background: var(--gradient-primary);
+}
+
+.text-secondary {
+  color: var(--text-secondary-text);
+}
+
+.text-muted {
+  color: var(--text-muted-text);
+}
+
+.shadow-soft-card {
+  box-shadow: var(--shadow-soft-card);
+}
+
+.shadow-soft-card-strong {
+  box-shadow: var(--shadow-soft-card-strong);
+}
+
+.shell-page-frame {
+  position: relative;
+  overflow: hidden;
+}
+
+.shell-page-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at top right, hsl(var(--primary) / 0.12), transparent 28%),
+    radial-gradient(circle at bottom left, rgba(111, 97, 241, 0.1), transparent 24%);
+  opacity: 0.9;
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-100%);
   }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-left {
+  animation: slideInLeft 0.3s ease-out;
 }

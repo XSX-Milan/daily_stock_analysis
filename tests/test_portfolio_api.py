@@ -178,6 +178,98 @@ class PortfolioApiTestCase(unittest.TestCase):
         detail = second.json()
         self.assertEqual(detail.get("error"), "conflict")
 
+    def test_oversell_trade_returns_409_with_business_error(self) -> None:
+        create_resp = self.client.post(
+            "/api/v1/portfolio/accounts",
+            json={"name": "Main", "broker": "Demo", "market": "cn", "base_currency": "CNY"},
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        account_id = create_resp.json()["id"]
+
+        buy_resp = self.client.post(
+            "/api/v1/portfolio/trades",
+            json={
+                "account_id": account_id,
+                "symbol": "600519",
+                "trade_date": "2026-01-02",
+                "side": "buy",
+                "quantity": 10,
+                "price": 100,
+                "fee": 0,
+                "tax": 0,
+                "market": "cn",
+                "currency": "CNY",
+            },
+        )
+        self.assertEqual(buy_resp.status_code, 200)
+
+        sell_resp = self.client.post(
+            "/api/v1/portfolio/trades",
+            json={
+                "account_id": account_id,
+                "symbol": "600519",
+                "trade_date": "2026-01-03",
+                "side": "sell",
+                "quantity": 20,
+                "price": 90,
+                "fee": 0,
+                "tax": 0,
+                "market": "cn",
+                "currency": "CNY",
+            },
+        )
+        self.assertEqual(sell_resp.status_code, 409)
+        detail = sell_resp.json()
+        self.assertEqual(detail.get("error"), "portfolio_oversell")
+        self.assertIn("Oversell detected", detail.get("message", ""))
+
+    def test_duplicate_full_close_sell_still_returns_conflict(self) -> None:
+        create_resp = self.client.post(
+            "/api/v1/portfolio/accounts",
+            json={"name": "Main", "broker": "Demo", "market": "cn", "base_currency": "CNY"},
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        account_id = create_resp.json()["id"]
+
+        buy_resp = self.client.post(
+            "/api/v1/portfolio/trades",
+            json={
+                "account_id": account_id,
+                "symbol": "600519",
+                "trade_date": "2026-01-01",
+                "side": "buy",
+                "quantity": 10,
+                "price": 100,
+                "fee": 0,
+                "tax": 0,
+                "market": "cn",
+                "currency": "CNY",
+            },
+        )
+        self.assertEqual(buy_resp.status_code, 200)
+
+        payload = {
+            "account_id": account_id,
+            "symbol": "600519",
+            "trade_date": "2026-01-02",
+            "side": "sell",
+            "quantity": 10,
+            "price": 90,
+            "fee": 0,
+            "tax": 0,
+            "market": "cn",
+            "currency": "CNY",
+            "trade_uid": "dup-full-close-sell-1",
+        }
+        first_sell = self.client.post("/api/v1/portfolio/trades", json=payload)
+        self.assertEqual(first_sell.status_code, 200)
+
+        second_sell = self.client.post("/api/v1/portfolio/trades", json=payload)
+        self.assertEqual(second_sell.status_code, 409)
+        detail = second_sell.json()
+        self.assertEqual(detail.get("error"), "conflict")
+        self.assertIn("Duplicate trade_uid", detail.get("message", ""))
+
     def test_event_list_endpoints_and_filters(self) -> None:
         create_resp = self.client.post(
             "/api/v1/portfolio/accounts",
@@ -260,6 +352,85 @@ class PortfolioApiTestCase(unittest.TestCase):
         corp_payload = corp_list_resp.json()
         self.assertEqual(corp_payload["total"], 1)
         self.assertEqual(corp_payload["items"][0]["action_type"], "cash_dividend")
+
+    def test_delete_event_endpoints_remove_records_and_allow_snapshot_recovery(self) -> None:
+        create_resp = self.client.post(
+            "/api/v1/portfolio/accounts",
+            json={"name": "Main", "broker": "Demo", "market": "cn", "base_currency": "CNY"},
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        account_id = create_resp.json()["id"]
+
+        cash_resp = self.client.post(
+            "/api/v1/portfolio/cash-ledger",
+            json={
+                "account_id": account_id,
+                "event_date": "2026-01-01",
+                "direction": "in",
+                "amount": 10000,
+                "currency": "CNY",
+            },
+        )
+        trade_resp = self.client.post(
+            "/api/v1/portfolio/trades",
+            json={
+                "account_id": account_id,
+                "symbol": "600519",
+                "trade_date": "2026-01-02",
+                "side": "buy",
+                "quantity": 10,
+                "price": 100,
+                "fee": 0,
+                "tax": 0,
+                "market": "cn",
+                "currency": "CNY",
+            },
+        )
+        corp_resp = self.client.post(
+            "/api/v1/portfolio/corporate-actions",
+            json={
+                "account_id": account_id,
+                "symbol": "600519",
+                "effective_date": "2026-01-03",
+                "action_type": "cash_dividend",
+                "market": "cn",
+                "currency": "CNY",
+                "cash_dividend_per_share": 1.0,
+            },
+        )
+        self.assertEqual(cash_resp.status_code, 200)
+        self.assertEqual(trade_resp.status_code, 200)
+        self.assertEqual(corp_resp.status_code, 200)
+
+        self._save_close("600519", date(2026, 1, 3), 100.0)
+        snapshot_before = self.client.get(
+            "/api/v1/portfolio/snapshot",
+            params={"account_id": account_id, "as_of": "2026-01-03"},
+        )
+        self.assertEqual(snapshot_before.status_code, 200)
+        self.assertEqual(snapshot_before.json()["accounts"][0]["positions"][0]["quantity"], 10.0)
+
+        delete_trade = self.client.delete(f"/api/v1/portfolio/trades/{trade_resp.json()['id']}")
+        self.assertEqual(delete_trade.status_code, 200)
+        self.assertEqual(delete_trade.json()["deleted"], 1)
+
+        snapshot_after_trade = self.client.get(
+            "/api/v1/portfolio/snapshot",
+            params={"account_id": account_id, "as_of": "2026-01-03"},
+        )
+        self.assertEqual(snapshot_after_trade.status_code, 200)
+        self.assertEqual(snapshot_after_trade.json()["accounts"][0]["positions"], [])
+
+        delete_cash = self.client.delete(f"/api/v1/portfolio/cash-ledger/{cash_resp.json()['id']}")
+        self.assertEqual(delete_cash.status_code, 200)
+        self.assertEqual(delete_cash.json()["deleted"], 1)
+
+        delete_corp = self.client.delete(f"/api/v1/portfolio/corporate-actions/{corp_resp.json()['id']}")
+        self.assertEqual(delete_corp.status_code, 200)
+        self.assertEqual(delete_corp.json()["deleted"], 1)
+
+        missing_trade = self.client.delete("/api/v1/portfolio/trades/999999")
+        self.assertEqual(missing_trade.status_code, 404)
 
     def test_csv_broker_list_endpoint(self) -> None:
         resp = self.client.get("/api/v1/portfolio/imports/csv/brokers")

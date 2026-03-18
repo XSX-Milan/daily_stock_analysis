@@ -32,7 +32,7 @@ from api.v1.schemas.history import (
 from api.v1.schemas.common import ErrorResponse
 from src.storage import DatabaseManager
 from src.services.history_service import HistoryService, MarkdownReportGenerationError
-from src.utils.data_processing import normalize_model_used
+from src.utils.data_processing import normalize_model_used, extract_fundamental_detail_fields
 
 logger = logging.getLogger(__name__)
 
@@ -254,10 +254,21 @@ def get_history_detail(
             take_profit=result.get("take_profit")
         )
         
+        fallback_fundamental = db_manager.get_latest_fundamental_snapshot(
+            query_id=result.get("query_id", ""),
+            code=result.get("stock_code", ""),
+        )
+        extracted_fundamental = extract_fundamental_detail_fields(
+            context_snapshot=result.get("context_snapshot"),
+            fallback_fundamental_payload=fallback_fundamental,
+        )
+
         details = ReportDetails(
             news_content=result.get("news_content"),
             raw_result=result.get("raw_result"),
-            context_snapshot=result.get("context_snapshot")
+            context_snapshot=result.get("context_snapshot"),
+            financial_report=extracted_fundamental.get("financial_report"),
+            dividend_metrics=extracted_fundamental.get("dividend_metrics"),
         )
         
         return AnalysisReport(

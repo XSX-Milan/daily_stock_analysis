@@ -17,8 +17,10 @@ from src.config import (
     canonicalize_llm_channel_protocol,
     channel_allows_empty_api_key,
     get_configured_llm_models,
+    normalize_news_strategy_profile,
     normalize_llm_channel_model,
     parse_env_bool,
+    resolve_news_window_days,
     resolve_llm_channel_protocol,
     setup_env,
 )
@@ -58,6 +60,15 @@ class SystemConfigService:
     def get_schema(self) -> Dict[str, Any]:
         """Return grouped schema metadata for UI rendering."""
         return build_schema_response()
+
+    @staticmethod
+    def _reload_runtime_singletons() -> None:
+        """Reset runtime singleton services after config reload."""
+        from src.agent.tools.data_tools import reset_fetcher_manager
+        from src.search_service import reset_search_service
+
+        reset_fetcher_manager()
+        reset_search_service()
 
     def get_config(self, include_schema: bool = True, mask_token: str = "******") -> Dict[str, Any]:
         """Return current config values without server-side secret masking."""
@@ -222,11 +233,13 @@ class SystemConfigService:
         if errors:
             raise ConfigValidationError(issues=errors)
 
+        submitted_keys: Set[str] = set()
         updates: List[Tuple[str, str]] = []
         sensitive_keys: Set[str] = set()
         for item in items:
             key = item["key"].upper()
             value = item["value"]
+            submitted_keys.add(key)
             updates.append((key, value))
             field_schema = get_field_definition(key)
             if bool(field_schema.get("is_sensitive", False)):
@@ -243,18 +256,21 @@ class SystemConfigService:
         if reload_now:
             try:
                 Config.reset_instance()
-                from src.agent.tools.data_tools import reset_fetcher_manager
-                from src.search_service import reset_search_service
-
-                reset_fetcher_manager()
-                reset_search_service()
+                self._reload_runtime_singletons()
                 setup_env(override=True)
                 config = Config.get_instance()
-                warnings = config.validate()
+                warnings.extend(config.validate())
                 reload_triggered = True
             except Exception as exc:  # pragma: no cover - defensive branch
                 logger.error("Configuration reload failed: %s", exc, exc_info=True)
                 warnings.append("Configuration updated but reload failed")
+
+        warnings.extend(
+            self._build_explainability_warnings(
+                submitted_keys=submitted_keys,
+                reload_now=reload_now,
+            )
+        )
 
         return {
             "success": True,
@@ -265,6 +281,62 @@ class SystemConfigService:
             "updated_keys": updated_keys,
             "warnings": warnings,
         }
+
+    def _build_explainability_warnings(
+        self,
+        *,
+        submitted_keys: Set[str],
+        reload_now: bool,
+    ) -> List[str]:
+        """Append user-facing runtime explainability warnings for key settings."""
+        warnings: List[str] = []
+        if not submitted_keys:
+            return warnings
+
+        current_map = self._manager.read_config_map()
+
+        if submitted_keys & {"NEWS_MAX_AGE_DAYS", "NEWS_STRATEGY_PROFILE"}:
+            raw_profile = current_map.get("NEWS_STRATEGY_PROFILE", "short")
+            profile = normalize_news_strategy_profile(raw_profile)
+            try:
+                max_age = max(1, int(current_map.get("NEWS_MAX_AGE_DAYS", "3") or "3"))
+            except (TypeError, ValueError):
+                max_age = 3
+            effective_days = resolve_news_window_days(
+                news_max_age_days=max_age,
+                news_strategy_profile=profile,
+            )
+            warnings.append(
+                (
+                    "新闻窗口已按策略计算："
+                    f"NEWS_STRATEGY_PROFILE={profile}, "
+                    f"NEWS_MAX_AGE_DAYS={max_age}, "
+                    f"effective_days={effective_days} "
+                    "(effective_days=min(profile_days, NEWS_MAX_AGE_DAYS))."
+                )
+            )
+
+        if "MAX_WORKERS" in submitted_keys:
+            try:
+                max_workers = max(1, int(current_map.get("MAX_WORKERS", "3") or "3"))
+            except (TypeError, ValueError):
+                max_workers = 3
+            if reload_now:
+                warnings.append(
+                    (
+                        f"MAX_WORKERS={max_workers} 已保存。任务队列空闲时会自动应用；"
+                        "若当前存在运行中任务，将在队列空闲后生效。"
+                    )
+                )
+            else:
+                warnings.append(
+                    (
+                        f"MAX_WORKERS={max_workers} 已写入 .env，但本次未触发运行时重载"
+                        "（reload_now=false）；重载后才会应用。"
+                    )
+                )
+
+        return warnings
 
     def apply_simple_updates(
         self,

@@ -7,6 +7,7 @@ interface SelectOption {
 }
 
 interface SelectProps {
+  id?: string;
   value: string;
   onChange: (value: string) => void;
   options: SelectOption[];
@@ -23,6 +24,7 @@ interface SelectProps {
  * Select component with terminal-inspired styling.
  */
 export const Select: React.FC<SelectProps> = ({
+  id,
   value,
   onChange,
   options,
@@ -32,13 +34,14 @@ export const Select: React.FC<SelectProps> = ({
   className = '',
 }) => {
   const selectId = useId();
+  const resolvedId = id ?? selectId;
 
   return (
     <div className={cn('flex flex-col', className)}>
-      {label ? <label htmlFor={selectId} className="mb-2 text-sm font-medium text-foreground">{label}</label> : null}
+      {label ? <label htmlFor={resolvedId} className="mb-2 text-sm font-medium text-foreground">{label}</label> : null}
       <div className="relative">
         <select
-          id={selectId}
+          id={resolvedId}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}

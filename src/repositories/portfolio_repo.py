@@ -149,6 +149,11 @@ class PortfolioRepository:
                 dedup_hash=dedup_hash,
             )
             session.add(row)
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=account_id,
+                from_date=trade_date,
+            )
             try:
                 session.commit()
             except IntegrityError as exc:
@@ -190,6 +195,11 @@ class PortfolioRepository:
                 note=note,
             )
             session.add(row)
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=account_id,
+                from_date=event_date,
+            )
             session.commit()
             session.refresh(row)
             return row
@@ -220,9 +230,62 @@ class PortfolioRepository:
                 note=note,
             )
             session.add(row)
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=account_id,
+                from_date=effective_date,
+            )
             session.commit()
             session.refresh(row)
             return row
+
+    def delete_trade(self, trade_id: int) -> bool:
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(PortfolioTrade).where(PortfolioTrade.id == trade_id).limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=int(row.account_id),
+                from_date=row.trade_date,
+            )
+            session.delete(row)
+            session.commit()
+            return True
+
+    def delete_cash_ledger(self, entry_id: int) -> bool:
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(PortfolioCashLedger).where(PortfolioCashLedger.id == entry_id).limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=int(row.account_id),
+                from_date=row.event_date,
+            )
+            session.delete(row)
+            session.commit()
+            return True
+
+    def delete_corporate_action(self, action_id: int) -> bool:
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(PortfolioCorporateAction).where(PortfolioCorporateAction.id == action_id).limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            self._invalidate_account_cache_in_session(
+                session=session,
+                account_id=int(row.account_id),
+                from_date=row.effective_date,
+            )
+            session.delete(row)
+            session.commit()
+            return True
 
     def has_trade_uid(self, account_id: int, trade_uid: Optional[str]) -> bool:
         """Return True when trade_uid already exists in the account."""
@@ -625,6 +688,22 @@ class PortfolioRepository:
                 )
 
             session.commit()
+
+    def _invalidate_account_cache_in_session(self, *, session: Any, account_id: int, from_date: date) -> None:
+        session.execute(
+            delete(PortfolioPositionLot).where(PortfolioPositionLot.account_id == account_id)
+        )
+        session.execute(
+            delete(PortfolioPosition).where(PortfolioPosition.account_id == account_id)
+        )
+        session.execute(
+            delete(PortfolioDailySnapshot).where(
+                and_(
+                    PortfolioDailySnapshot.account_id == account_id,
+                    PortfolioDailySnapshot.snapshot_date >= from_date,
+                )
+            )
+        )
 
     def upsert_daily_snapshot(
         self,

@@ -4,7 +4,7 @@ import { Pie, PieChart, ResponsiveContainer, Tooltip, Legend, Cell } from 'recha
 import { portfolioApi } from '../api/portfolio';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
-import { ApiErrorAlert, Card, Badge } from '../components/common';
+import { ApiErrorAlert, Card, Badge, ConfirmDialog } from '../components/common';
 import { toDateInputValue } from '../utils/format';
 import type {
   PortfolioAccountItem,
@@ -38,6 +38,11 @@ type FlatPosition = PortfolioPositionItem & {
   accountId: number;
   accountName: string;
 };
+
+type PendingDelete =
+  | { eventType: 'trade'; id: number; message: string }
+  | { eventType: 'cash'; id: number; message: string }
+  | { eventType: 'corporate'; id: number; message: string };
 
 function getTodayIso(): string {
   return toDateInputValue(new Date());
@@ -77,6 +82,11 @@ function formatBrokerLabel(value: string, displayName?: string): string {
 }
 
 const PortfolioPage: React.FC = () => {
+  // Set page title
+  useEffect(() => {
+    document.title = '持仓分析 - DSA';
+  }, []);
+
   const [accounts, setAccounts] = useState<PortfolioAccountItem[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<AccountOption>('all');
   const [showCreateAccount, setShowCreateAccount] = useState(false);
@@ -120,6 +130,8 @@ const PortfolioPage: React.FC = () => {
   const [tradeEvents, setTradeEvents] = useState<PortfolioTradeListItem[]>([]);
   const [cashEvents, setCashEvents] = useState<PortfolioCashLedgerListItem[]>([]);
   const [corporateEvents, setCorporateEvents] = useState<PortfolioCorporateActionListItem[]>([]);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   const [tradeForm, setTradeForm] = useState({
     symbol: '',
@@ -154,6 +166,11 @@ const PortfolioPage: React.FC = () => {
   const writableAccountId = writableAccount?.id;
   const writeBlocked = !writableAccountId;
   const totalEventPages = Math.max(1, Math.ceil(eventTotal / DEFAULT_PAGE_SIZE));
+  const currentEventCount = eventType === 'trade'
+    ? tradeEvents.length
+    : eventType === 'cash'
+      ? cashEvents.length
+      : corporateEvents.length;
 
   const loadAccounts = useCallback(async () => {
     try {
@@ -228,7 +245,7 @@ const PortfolioPage: React.FC = () => {
     }
   }, [queryAccountId, costMethod]);
 
-  const loadEvents = useCallback(async () => {
+  const loadEventsPage = useCallback(async (page: number) => {
     setEventLoading(true);
     try {
       if (eventType === 'trade') {
@@ -238,7 +255,7 @@ const PortfolioPage: React.FC = () => {
           dateTo: eventDateTo || undefined,
           symbol: eventSymbol || undefined,
           side: eventSide || undefined,
-          page: eventPage,
+          page,
           pageSize: DEFAULT_PAGE_SIZE,
         });
         setTradeEvents(response.items || []);
@@ -249,7 +266,7 @@ const PortfolioPage: React.FC = () => {
           dateFrom: eventDateFrom || undefined,
           dateTo: eventDateTo || undefined,
           direction: eventDirection || undefined,
-          page: eventPage,
+          page,
           pageSize: DEFAULT_PAGE_SIZE,
         });
         setCashEvents(response.items || []);
@@ -261,7 +278,7 @@ const PortfolioPage: React.FC = () => {
           dateTo: eventDateTo || undefined,
           symbol: eventSymbol || undefined,
           actionType: eventActionType || undefined,
-          page: eventPage,
+          page,
           pageSize: DEFAULT_PAGE_SIZE,
         });
         setCorporateEvents(response.items || []);
@@ -277,12 +294,19 @@ const PortfolioPage: React.FC = () => {
     eventDateFrom,
     eventDateTo,
     eventDirection,
-    eventPage,
     eventSide,
     eventSymbol,
     eventType,
     queryAccountId,
   ]);
+
+  const loadEvents = useCallback(async () => {
+    await loadEventsPage(eventPage);
+  }, [eventPage, loadEventsPage]);
+
+  const refreshPortfolioData = useCallback(async (page = eventPage) => {
+    await Promise.all([loadSnapshotAndRisk(), loadEventsPage(page)]);
+  }, [eventPage, loadEventsPage, loadSnapshotAndRisk]);
 
   useEffect(() => {
     void loadAccounts();
@@ -370,7 +394,7 @@ const PortfolioPage: React.FC = () => {
         tradeUid: tradeForm.tradeUid || undefined,
         note: tradeForm.note || undefined,
       });
-      await Promise.all([loadSnapshotAndRisk(), loadEvents()]);
+      await refreshPortfolioData();
       setTradeForm((prev) => ({ ...prev, symbol: '', tradeUid: '', note: '' }));
     } catch (err) {
       setError(getParsedApiError(err));
@@ -393,7 +417,7 @@ const PortfolioPage: React.FC = () => {
         currency: cashForm.currency || undefined,
         note: cashForm.note || undefined,
       });
-      await Promise.all([loadSnapshotAndRisk(), loadEvents()]);
+      await refreshPortfolioData();
       setCashForm((prev) => ({ ...prev, note: '' }));
     } catch (err) {
       setError(getParsedApiError(err));
@@ -417,7 +441,7 @@ const PortfolioPage: React.FC = () => {
         splitRatio: corpForm.splitRatio ? Number(corpForm.splitRatio) : undefined,
         note: corpForm.note || undefined,
       });
-      await Promise.all([loadSnapshotAndRisk(), loadEvents()]);
+      await refreshPortfolioData();
       setCorpForm((prev) => ({ ...prev, symbol: '', note: '' }));
     } catch (err) {
       setError(getParsedApiError(err));
@@ -450,12 +474,51 @@ const PortfolioPage: React.FC = () => {
       const committed = await portfolioApi.commitCsvImport(writableAccountId, selectedBroker, csvFile, csvDryRun);
       setCsvCommitResult(committed);
       if (!csvDryRun) {
-        await Promise.all([loadSnapshotAndRisk(), loadEvents()]);
+        await refreshPortfolioData();
       }
     } catch (err) {
       setError(getParsedApiError(err));
     } finally {
       setCsvCommitting(false);
+    }
+  };
+
+  const openDeleteDialog = (item: PendingDelete) => {
+    if (!writableAccountId) {
+      setWriteWarning('请先在右上角选择具体账户，再进行删除修正。');
+      return;
+    }
+    setPendingDelete(item);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete || deleteLoading) return;
+    if (!writableAccountId) {
+      setWriteWarning('请先在右上角选择具体账户，再进行删除修正。');
+      setPendingDelete(null);
+      return;
+    }
+
+    const nextPage = currentEventCount === 1 && eventPage > 1 ? eventPage - 1 : eventPage;
+    try {
+      setDeleteLoading(true);
+      setWriteWarning(null);
+      if (pendingDelete.eventType === 'trade') {
+        await portfolioApi.deleteTrade(pendingDelete.id);
+      } else if (pendingDelete.eventType === 'cash') {
+        await portfolioApi.deleteCashLedger(pendingDelete.id);
+      } else {
+        await portfolioApi.deleteCorporateAction(pendingDelete.id);
+      }
+      setPendingDelete(null);
+      if (nextPage !== eventPage) {
+        setEventPage(nextPage);
+      }
+      await refreshPortfolioData(nextPage);
+    } catch (err) {
+      setError(getParsedApiError(err));
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -564,7 +627,7 @@ const PortfolioPage: React.FC = () => {
         )}
       </section>
 
-      {error ? <ApiErrorAlert error={error} /> : null}
+      {error ? <ApiErrorAlert error={error} onDismiss={() => setError(null)} /> : null}
       {riskWarning ? (
         <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-amber-100 text-sm">
           风险模块降级：{riskWarning}
@@ -935,20 +998,68 @@ const PortfolioPage: React.FC = () => {
                 <option value="split_adjustment">拆并股调整</option>
               </select>
             ) : null}
+            <div className="text-[11px] text-secondary">
+              {writeBlocked ? '删除修正仅在单账户视图可用。请先选择具体账户后再删除错误流水。' : '如有错误流水，可直接删除后重新录入。'}
+            </div>
             <div className="max-h-64 overflow-auto rounded-lg border border-white/10 p-2">
               {eventType === 'trade' && tradeEvents.map((item) => (
-                <div key={`t-${item.id}`} className="text-xs text-secondary py-1 border-b border-white/5">
-                  {item.tradeDate} {formatSideLabel(item.side)} {item.symbol} 数量={item.quantity} 价格={item.price}
+                <div key={`t-${item.id}`} className="flex items-start justify-between gap-3 border-b border-white/5 py-2 text-xs text-secondary">
+                  <div className="min-w-0">
+                    {item.tradeDate} {formatSideLabel(item.side)} {item.symbol} 数量={item.quantity} 价格={item.price}
+                  </div>
+                  {!writeBlocked ? (
+                    <button
+                      type="button"
+                      className="btn-secondary shrink-0 !px-3 !py-1 !text-[11px]"
+                      onClick={() => openDeleteDialog({
+                        eventType: 'trade',
+                        id: item.id,
+                        message: `确认删除 ${item.tradeDate} 的${formatSideLabel(item.side)}流水 ${item.symbol}（数量 ${item.quantity}，价格 ${item.price}）吗？`,
+                      })}
+                    >
+                      删除
+                    </button>
+                  ) : null}
                 </div>
               ))}
               {eventType === 'cash' && cashEvents.map((item) => (
-                <div key={`c-${item.id}`} className="text-xs text-secondary py-1 border-b border-white/5">
-                  {item.eventDate} {formatCashDirectionLabel(item.direction)} {item.amount} {item.currency}
+                <div key={`c-${item.id}`} className="flex items-start justify-between gap-3 border-b border-white/5 py-2 text-xs text-secondary">
+                  <div className="min-w-0">
+                    {item.eventDate} {formatCashDirectionLabel(item.direction)} {item.amount} {item.currency}
+                  </div>
+                  {!writeBlocked ? (
+                    <button
+                      type="button"
+                      className="btn-secondary shrink-0 !px-3 !py-1 !text-[11px]"
+                      onClick={() => openDeleteDialog({
+                        eventType: 'cash',
+                        id: item.id,
+                        message: `确认删除 ${item.eventDate} 的资金流水（${formatCashDirectionLabel(item.direction)} ${item.amount} ${item.currency}）吗？`,
+                      })}
+                    >
+                      删除
+                    </button>
+                  ) : null}
                 </div>
               ))}
               {eventType === 'corporate' && corporateEvents.map((item) => (
-                <div key={`ca-${item.id}`} className="text-xs text-secondary py-1 border-b border-white/5">
-                  {item.effectiveDate} {formatCorporateActionLabel(item.actionType)} {item.symbol}
+                <div key={`ca-${item.id}`} className="flex items-start justify-between gap-3 border-b border-white/5 py-2 text-xs text-secondary">
+                  <div className="min-w-0">
+                    {item.effectiveDate} {formatCorporateActionLabel(item.actionType)} {item.symbol}
+                  </div>
+                  {!writeBlocked ? (
+                    <button
+                      type="button"
+                      className="btn-secondary shrink-0 !px-3 !py-1 !text-[11px]"
+                      onClick={() => openDeleteDialog({
+                        eventType: 'corporate',
+                        id: item.id,
+                        message: `确认删除 ${item.effectiveDate} 的公司行为 ${formatCorporateActionLabel(item.actionType)}（${item.symbol}）吗？`,
+                      })}
+                    >
+                      删除
+                    </button>
+                  ) : null}
                 </div>
               ))}
               {!eventLoading
@@ -974,6 +1085,20 @@ const PortfolioPage: React.FC = () => {
           </div>
         </Card>
       </section>
+      <ConfirmDialog
+        isOpen={Boolean(pendingDelete)}
+        title="删除错误流水"
+        message={pendingDelete?.message || '确认删除这条流水吗？'}
+        confirmText={deleteLoading ? '删除中...' : '确认删除'}
+        cancelText="取消"
+        isDanger
+        onConfirm={() => void handleConfirmDelete()}
+        onCancel={() => {
+          if (!deleteLoading) {
+            setPendingDelete(null);
+          }
+        }}
+      />
     </div>
   );
 };

@@ -93,6 +93,8 @@ export default {
         'glow-purple': '0 0 20px rgba(168, 85, 247, 0.3)',
         'glow-success': '0 0 20px rgba(0, 255, 136, 0.3)',
         'glow-danger': '0 0 20px rgba(255, 68, 102, 0.3)',
+        'cyan/20': '0 12px 28px rgba(0, 212, 255, 0.2)',
+        'cyan/22': '0 18px 34px rgba(0, 212, 255, 0.22)',
       },
       borderRadius: {
         lg: 'var(--radius)',

@@ -1131,7 +1131,7 @@ class DataFetcherManager:
         策略：
         1. 检查配置开关
         2. 检查熔断器状态
-        3. 依次尝试多个数据源：AkshareFetcher -> TushareFetcher -> EfinanceFetcher
+        3. 依次尝试多个数据源：数据源优先级与获取daily的数据优先级一致
         4. 所有数据源失败则返回 None（降级兜底）
 
         Args:
@@ -1155,29 +1155,27 @@ class DataFetcherManager:
 
         circuit_breaker = get_chip_circuit_breaker()
 
-        # 定义筹码数据源优先级列表
-        chip_sources = [
-            ("AkshareFetcher", "akshare_chip"),
-            ("TushareFetcher", "tushare_chip"),
-            ("EfinanceFetcher", "efinance_chip"),
-        ]
+        # 直接遍历管理器已经按 priority 排好序的数据源列表
+        for fetcher in self._fetchers:
+            # 只处理实现了筹码分布逻辑的数据源
+            if not hasattr(fetcher, 'get_chip_distribution'):
+                continue
+            
+            fetcher_name = fetcher.name
+            # 动态生成熔断器的 key，例如 "TushareFetcher" -> "tushare_chip"
+            source_key = f"{fetcher_name.replace('Fetcher', '').lower()}_chip"
 
-        for fetcher_name, source_key in chip_sources:
             # 检查熔断器状态
             if not circuit_breaker.is_available(source_key):
                 logger.debug(f"[熔断] {fetcher_name} 筹码接口处于熔断状态，尝试下一个")
                 continue
 
             try:
-                for fetcher in self._fetchers:
-                    if fetcher.name == fetcher_name:
-                        if hasattr(fetcher, 'get_chip_distribution'):
-                            chip = fetcher.get_chip_distribution(stock_code)
-                            if chip is not None:
-                                circuit_breaker.record_success(source_key)
-                                logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
-                                return chip
-                        break
+                chip = fetcher.get_chip_distribution(stock_code)
+                if chip is not None:
+                    circuit_breaker.record_success(source_key)
+                    logger.info(f"[筹码分布] {stock_code} 成功获取 (来源: {fetcher_name})")
+                    return chip
             except Exception as e:
                 logger.warning(f"[筹码分布] {fetcher_name} 获取 {stock_code} 失败: {e}")
                 circuit_breaker.record_failure(source_key, str(e))
@@ -1799,8 +1797,59 @@ class DataFetcherManager:
         growth_payload = bundle_payload.get("growth", {}) if isinstance(bundle_payload, dict) else {}
         earnings_payload = bundle_payload.get("earnings", {}) if isinstance(bundle_payload, dict) else {}
         institution_payload = bundle_payload.get("institution", {}) if isinstance(bundle_payload, dict) else {}
+        if not isinstance(growth_payload, dict):
+            growth_payload = {}
+        else:
+            growth_payload = dict(growth_payload)
+        if not isinstance(earnings_payload, dict):
+            earnings_payload = {}
+        else:
+            earnings_payload = dict(earnings_payload)
+        if not isinstance(institution_payload, dict):
+            institution_payload = {}
+        else:
+            institution_payload = dict(institution_payload)
+
+        # Derive TTM dividend yield from already-fetched quote price; avoid extra quote calls.
+        earnings_extra_errors: List[str] = []
+        dividend_payload = earnings_payload.get("dividend")
+        if isinstance(dividend_payload, dict):
+            dividend_payload = dict(dividend_payload)
+            ttm_cash_raw = dividend_payload.get("ttm_cash_dividend_per_share")
+            ttm_cash = None
+            if ttm_cash_raw is not None:
+                try:
+                    ttm_cash = float(ttm_cash_raw)
+                except (TypeError, ValueError):
+                    earnings_extra_errors.append("invalid_ttm_cash_dividend_per_share")
+            if isinstance(quote_payload, dict):
+                latest_price_raw = quote_payload.get("price")
+            else:
+                latest_price_raw = getattr(quote_payload, "price", None) if quote_payload else None
+            latest_price = None
+            if latest_price_raw is not None:
+                try:
+                    latest_price = float(latest_price_raw)
+                except (TypeError, ValueError):
+                    latest_price = None
+            ttm_yield = None
+            if ttm_cash is not None:
+                if latest_price is not None and latest_price > 0:
+                    ttm_yield = round(ttm_cash / latest_price * 100.0, 4)
+                else:
+                    earnings_extra_errors.append("invalid_price_for_ttm_dividend_yield")
+
+            dividend_payload["ttm_dividend_yield_pct"] = ttm_yield
+            if ttm_yield is not None:
+                dividend_payload["yield_formula"] = "ttm_cash_dividend_per_share / latest_price * 100"
+            earnings_payload["dividend"] = dividend_payload
+
         adapter_errors = list(bundle_payload.get("errors", [])) if isinstance(bundle_payload, dict) else []
         adapter_errors.extend(bundle_errors)
+        growth_errors = list(adapter_errors)
+        earnings_errors = list(adapter_errors)
+        earnings_errors.extend(earnings_extra_errors)
+        institution_errors = list(adapter_errors)
 
         growth_status = self._infer_block_status(growth_payload, bundle_status)
         earnings_status = self._infer_block_status(earnings_payload, bundle_status)
@@ -1810,19 +1859,19 @@ class DataFetcherManager:
             growth_status,
             growth_payload,
             bundle_chain,
-            adapter_errors,
+            growth_errors,
         )
         result_ctx["earnings"] = self._build_fundamental_block(
             earnings_status,
             earnings_payload,
             bundle_chain,
-            adapter_errors,
+            earnings_errors,
         )
         result_ctx["institution"] = self._build_fundamental_block(
             institution_status,
             institution_payload,
             bundle_chain,
-            adapter_errors,
+            institution_errors,
         )
 
         # capital flow
@@ -2085,69 +2134,57 @@ class DataFetcherManager:
         )
 
     def _get_sector_rankings_with_meta(
-        self,
-        n: int = 5,
-    ) -> Tuple[List[Dict], List[Dict], List[Dict[str, Any]], str]:
-        """Get sector rankings with ordered fallback chain metadata."""
-        # Keep this list intentionally constrained to stable sector-capable providers.
-        # AkshareFetcher internally handles EM -> Sina fallback.
-        fetcher_order = ["AkshareFetcher", "TushareFetcher", "EfinanceFetcher"]
-        source_chain: List[Dict[str, Any]] = []
-        last_error = ""
+            self,
+            n: int = 5,
+        ) -> Tuple[List[Dict], List[Dict], List[Dict[str, Any]], str]:
+            """Get sector rankings with ordered fallback chain metadata."""
+            source_chain: List[Dict[str, Any]] = []
+            last_error = ""
 
-        for fetcher_name in fetcher_order:
-            fetcher = next((f for f in self._fetchers if f.name == fetcher_name), None)
-            if fetcher is None:
-                source_chain.append(
-                    {
-                        "provider": fetcher_name,
-                        "result": "not_available",
-                        "duration_ms": 0,
-                        "error": "fetcher not registered",
-                    }
-                )
-                last_error = f"{fetcher_name} not registered"
-                continue
+            # 直接遍历管理器已经按 priority 排好序的数据源列表
+            for fetcher in self._fetchers:
+                if not hasattr(fetcher, 'get_sector_rankings'):
+                    continue
 
-            start = time.time()
-            try:
-                data = fetcher.get_sector_rankings(n)
-                duration_ms = int((time.time() - start) * 1000)
-                if data and data[0] is not None and data[1] is not None:
+                start = time.time()
+                try:
+                    data = fetcher.get_sector_rankings(n)
+                    duration_ms = int((time.time() - start) * 1000)
+                    if data and data[0] is not None and data[1] is not None:
+                        source_chain.append(
+                            {
+                                "provider": fetcher.name,
+                                "result": "ok",
+                                "duration_ms": duration_ms,
+                            }
+                        )
+                        logger.info(f"[{fetcher.name}] 获取板块排行成功")
+                        return data[0], data[1], source_chain, ""
+
+                    last_error = f"{fetcher.name}返回空结果"
                     source_chain.append(
                         {
                             "provider": fetcher.name,
-                            "result": "ok",
+                            "result": "empty",
                             "duration_ms": duration_ms,
+                            "error": last_error,
                         }
                     )
-                    logger.info(f"[{fetcher.name}] 获取板块排行成功")
-                    return data[0], data[1], source_chain, ""
+                except Exception as e:
+                    error_type, error_reason = summarize_exception(e)
+                    last_error = f"{fetcher.name} ({error_type}) {error_reason}"
+                    duration_ms = int((time.time() - start) * 1000)
+                    source_chain.append(
+                        {
+                            "provider": fetcher.name,
+                            "result": "failed",
+                            "duration_ms": duration_ms,
+                            "error": error_reason,
+                        }
+                    )
+                    logger.warning(f"[{fetcher.name}] 获取板块排行失败: {error_reason}")
 
-                last_error = f"{fetcher.name}返回空结果"
-                source_chain.append(
-                    {
-                        "provider": fetcher.name,
-                        "result": "empty",
-                        "duration_ms": duration_ms,
-                        "error": last_error,
-                    }
-                )
-            except Exception as e:
-                error_type, error_reason = summarize_exception(e)
-                last_error = f"{fetcher.name} ({error_type}) {error_reason}"
-                duration_ms = int((time.time() - start) * 1000)
-                source_chain.append(
-                    {
-                        "provider": fetcher.name,
-                        "result": "failed",
-                        "duration_ms": duration_ms,
-                        "error": error_reason,
-                    }
-                )
-                logger.warning(f"[{fetcher.name}] 获取板块排行失败: {error_reason}")
-
-        return [], [], source_chain, last_error
+            return [], [], source_chain, last_error
 
     def get_sector_rankings(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
         """获取板块涨跌榜（自动切换数据源）"""

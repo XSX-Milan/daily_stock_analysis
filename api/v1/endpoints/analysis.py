@@ -53,7 +53,11 @@ from src.services.task_queue import (
     DuplicateTaskError,
     TaskStatus as TaskStatusEnum,
 )
-from src.utils.data_processing import normalize_model_used, parse_json_field
+from src.utils.data_processing import (
+    normalize_model_used,
+    parse_json_field,
+    extract_fundamental_detail_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -261,8 +265,17 @@ def _handle_sync_analysis(
 
         # 构建报告结构
         report_data = result.get("report", {})
+        context_snapshot, fundamental_snapshot = _load_sync_fundamental_sources(
+            query_id=query_id,
+            stock_code=result.get("stock_code", stock_code),
+        )
         report = _build_analysis_report(
-            report_data, query_id, stock_code, result.get("stock_name")
+            report_data,
+            query_id,
+            stock_code,
+            result.get("stock_name"),
+            context_snapshot=context_snapshot,
+            fallback_fundamental_payload=fundamental_snapshot,
         )
 
         return AnalysisResultResponse(
@@ -555,11 +568,44 @@ def get_analysis_status(task_id: str) -> TaskStatus:
 # 辅助函数
 # ============================================================
 
+def _load_sync_fundamental_sources(
+    query_id: str,
+    stock_code: str,
+) -> tuple[Optional[Any], Optional[Dict[str, Any]]]:
+    """
+    Load context_snapshot and fallback fundamental snapshot for sync analyze response.
+    """
+    try:
+        from src.storage import DatabaseManager
+
+        db = DatabaseManager.get_instance()
+        records = db.get_analysis_history(query_id=query_id, code=stock_code, limit=1)
+        context_snapshot = None
+        if records:
+            context_snapshot = parse_json_field(getattr(records[0], "context_snapshot", None))
+
+        fallback_fundamental = db.get_latest_fundamental_snapshot(
+            query_id=query_id,
+            code=stock_code,
+        )
+        return context_snapshot, fallback_fundamental
+    except Exception as e:
+        logger.debug(
+            "load sync fundamental sources failed (fail-open): query_id=%s stock_code=%s err=%s",
+            query_id,
+            stock_code,
+            e,
+        )
+        return None, None
+
+
 def _build_analysis_report(
         report_data: Dict[str, Any],
         query_id: str,
         stock_code: str,
-        stock_name: Optional[str] = None
+        stock_name: Optional[str] = None,
+        context_snapshot: Optional[Any] = None,
+        fallback_fundamental_payload: Optional[Dict[str, Any]] = None,
 ) -> AnalysisReport:
     """
     构建符合 API 规范的分析报告
@@ -569,6 +615,8 @@ def _build_analysis_report(
         query_id: 查询 ID
         stock_code: 股票代码
         stock_name: 股票名称
+        context_snapshot: 上下文快照（可选）
+        fallback_fundamental_payload: 基本面快照 payload（可选）
         
     Returns:
         AnalysisReport: 结构化的分析报告
@@ -606,12 +654,18 @@ def _build_analysis_report(
             take_profit=strategy_data.get("take_profit")
         )
 
+    extracted_fundamental = extract_fundamental_detail_fields(
+        context_snapshot=context_snapshot,
+        fallback_fundamental_payload=fallback_fundamental_payload,
+    )
     details = None
-    if details_data:
+    if details_data or any(extracted_fundamental.values()) or context_snapshot is not None:
         details = ReportDetails(
             news_content=details_data.get("news_summary") or details_data.get("news_content"),
             raw_result=details_data,
-            context_snapshot=None
+            context_snapshot=context_snapshot,
+            financial_report=extracted_fundamental.get("financial_report"),
+            dividend_metrics=extracted_fundamental.get("dividend_metrics"),
         )
 
     return AnalysisReport(

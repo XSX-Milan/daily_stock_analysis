@@ -26,6 +26,11 @@ const HomePage: React.FC = () => {
   } = useAnalysisStore();
   const navigate = useNavigate();
 
+  // Set page title
+  useEffect(() => {
+    document.title = '每日选股分析 - DSA';
+  }, []);
+
   // Input state
   const [stockCode, setStockCode] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -398,25 +403,25 @@ const HomePage: React.FC = () => {
         onToggleItemSelection={handleToggleHistorySelection}
         onToggleSelectAll={handleToggleSelectAllHistory}
         onDeleteSelected={confirmDeleteHistory}
-        className="max-h-[80vh] md:max-h-[80vh] flex-1 overflow-hidden"
+        className="flex-1 overflow-hidden"
       />
     </div>
   );
 
   return (
     <div
-      className="min-h-screen flex flex-col md:grid overflow-hidden w-full"
+      className="flex min-h-0 w-full flex-col overflow-hidden md:grid md:h-[calc(100vh-5.5rem)] lg:h-[calc(100vh-2rem)]"
       style={{ gridTemplateColumns: 'minmax(12px, 1fr) 256px 24px minmax(auto, 896px) minmax(12px, 1fr)', gridTemplateRows: 'auto 1fr' }}
     >
       {/* Top Input Bar */}
       <header
-        className="md:col-start-2 md:col-end-5 md:row-start-1 py-3 px-3 md:px-0 border-b border-white/5 flex-shrink-0 flex items-center min-w-0 overflow-hidden"
+        className="md:col-start-2 md:col-end-5 md:row-start-1 py-3 px-3 md:px-0 flex-shrink-0 flex items-center min-w-0 overflow-hidden"
       >
         <div className="flex items-center gap-2 w-full min-w-0 flex-1" style={{ maxWidth: 'min(100%, 1168px)' }}>
           {/* Mobile hamburger */}
           <button
             onClick={() => setSidebarOpen(true)}
-            className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-white/10 transition-colors text-secondary-text hover:text-white flex-shrink-0"
+            className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-hover transition-colors text-secondary-text hover:text-foreground flex-shrink-0"
             title="历史记录"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -472,9 +477,9 @@ const HomePage: React.FC = () => {
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 md:hidden" onClick={() => setSidebarOpen(false)}>
-          <div className="absolute inset-0 bg-black/60" />
+          <div className="absolute inset-0 bg-[var(--home-mobile-overlay-bg)]" />
           <div
-            className="absolute left-0 top-0 bottom-0 w-72 flex flex-col glass-card overflow-hidden border-r border-white/10 shadow-2xl p-3"
+            className="absolute left-0 top-0 bottom-0 w-72 flex flex-col glass-card overflow-hidden border-r border-border/70 shadow-2xl p-3"
             onClick={(e) => e.stopPropagation()}
           >
             {sidebarContent}
@@ -483,7 +488,7 @@ const HomePage: React.FC = () => {
       )}
 
       {/* Right Report Detail */}
-      <section className="md:col-start-4 md:row-start-2 flex-1 overflow-y-auto overflow-x-auto px-3 md:px-0 md:pl-1 min-w-0 min-h-0">
+      <section className="md:col-start-4 md:row-start-2 flex-1 overflow-y-auto overflow-x-auto px-3 py-4 md:px-0 md:py-5 md:pl-2 md:pr-1 min-w-0 min-h-0">
         {analysisError ? (
           <ApiErrorAlert
             error={analysisError}
@@ -492,13 +497,13 @@ const HomePage: React.FC = () => {
         ) : null}
         {isLoadingReport ? (
           <div className="flex flex-col items-center justify-center h-full">
-            <div className="w-10 h-10 border-3 border-cyan/20 border-t-cyan rounded-full animate-spin" />
+            <div className="h-10 w-10 animate-spin rounded-full border-3 border-[var(--home-loading-ring-track)] border-t-[var(--home-loading-ring-head)]" />
             <p className="mt-3 text-secondary-text text-sm">加载报告中...</p>
           </div>
         ) : selectedReport ? (
-          <div className="max-w-4xl">
+          <div className="max-w-[980px] pb-8">
             {/* Action buttons */}
-            <div className="flex items-center justify-end mb-2 gap-2">
+            <div className="mb-3 flex items-center justify-end gap-2">
               <button
                 disabled={selectedReport.meta.id === undefined}
                 onClick={() => {
@@ -507,7 +512,7 @@ const HomePage: React.FC = () => {
                   const rid = selectedReport.meta.id!;
                   navigate(`/chat?stock=${encodeURIComponent(code)}&name=${encodeURIComponent(name)}&recordId=${rid}`);
                 }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan/10 border border-cyan/20 text-cyan text-sm hover:bg-cyan/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 bg-[var(--home-action-ai-bg)] border-[var(--home-action-ai-border)] text-[var(--home-action-ai-text)] hover:bg-[var(--home-action-ai-hover-bg)]"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -517,7 +522,7 @@ const HomePage: React.FC = () => {
               <button
                 disabled={selectedReport.meta.id === undefined}
                 onClick={() => setShowMarkdownDrawer(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple/10 border border-purple/20 text-purple text-sm hover:bg-purple/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 bg-[var(--home-action-report-bg)] border-[var(--home-action-report-border)] text-[var(--home-action-report-text)] hover:bg-[var(--home-action-report-hover-bg)]"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -534,7 +539,7 @@ const HomePage: React.FC = () => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
               </svg>
             </div>
-            <h3 className="text-base font-medium text-white mb-1.5">开始分析</h3>
+            <h3 className="text-base font-medium text-foreground mb-1.5">开始分析</h3>
             <p className="text-xs text-muted-text max-w-xs">
               输入股票代码进行分析，或从左侧选择历史报告查看
             </p>

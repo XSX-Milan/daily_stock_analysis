@@ -37,6 +37,29 @@ class PortfolioConflictError(Exception):
     """Raised when request conflicts with existing portfolio state."""
 
 
+class PortfolioOversellError(ValueError):
+    """Raised when a sell would exceed the available position quantity."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        trade_date: Optional[date],
+        requested_quantity: float,
+        available_quantity: float,
+    ) -> None:
+        self.symbol = symbol
+        self.trade_date = trade_date
+        self.requested_quantity = float(requested_quantity)
+        self.available_quantity = max(0.0, float(available_quantity))
+        date_hint = f" on {trade_date.isoformat()}" if trade_date is not None else ""
+        super().__init__(
+            "Oversell detected for "
+            f"{symbol}{date_hint}: requested={round(self.requested_quantity, 8)}, "
+            f"available={round(self.available_quantity, 8)}"
+        )
+
+
 @dataclass
 class _AvgState:
     quantity: float = 0.0
@@ -151,11 +174,27 @@ class PortfolioService:
         symbol_norm = canonical_stock_code(symbol)
         if not symbol_norm:
             raise ValueError("symbol is required")
+        trade_uid_norm = (trade_uid or "").strip() or None
+        dedup_hash_norm = (dedup_hash or "").strip() or None
+        self._validate_trade_identity(
+            account_id=account_id,
+            trade_uid=trade_uid_norm,
+            dedup_hash=dedup_hash_norm,
+        )
+        if side_norm == "sell":
+            self._validate_sell_quantity(
+                account_id=account_id,
+                symbol=symbol_norm,
+                market=market_norm,
+                currency=currency_norm,
+                trade_date=trade_date,
+                quantity=float(quantity),
+            )
 
         try:
             row = self.repo.add_trade(
                 account_id=account_id,
-                trade_uid=(trade_uid or "").strip() or None,
+                trade_uid=trade_uid_norm,
                 symbol=symbol_norm,
                 market=market_norm,
                 currency=currency_norm,
@@ -166,7 +205,7 @@ class PortfolioService:
                 fee=float(fee),
                 tax=float(tax),
                 note=(note or "").strip() or None,
-                dedup_hash=(dedup_hash or "").strip() or None,
+                dedup_hash=dedup_hash_norm,
             )
         except (DuplicateTradeUidError, DuplicateTradeDedupHashError) as exc:
             raise PortfolioConflictError(str(exc)) from exc
@@ -242,6 +281,15 @@ class PortfolioService:
             note=(note or "").strip() or None,
         )
         return {"id": row.id}
+
+    def delete_trade_event(self, trade_id: int) -> bool:
+        return self.repo.delete_trade(trade_id)
+
+    def delete_cash_ledger_event(self, entry_id: int) -> bool:
+        return self.repo.delete_cash_ledger(entry_id)
+
+    def delete_corporate_action_event(self, action_id: int) -> bool:
+        return self.repo.delete_corporate_action(action_id)
 
     def list_trade_events(
         self,
@@ -536,6 +584,116 @@ class PortfolioService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _validate_trade_identity(
+        self,
+        *,
+        account_id: int,
+        trade_uid: Optional[str],
+        dedup_hash: Optional[str],
+    ) -> None:
+        if trade_uid and self.repo.has_trade_uid(account_id, trade_uid):
+            raise PortfolioConflictError(f"Duplicate trade_uid for account_id={account_id}: {trade_uid}")
+        if dedup_hash and self.repo.has_trade_dedup_hash(account_id, dedup_hash):
+            raise PortfolioConflictError(f"Duplicate dedup_hash for account_id={account_id}: {dedup_hash}")
+
+    def _validate_sell_quantity(
+        self,
+        *,
+        account_id: int,
+        symbol: str,
+        market: str,
+        currency: str,
+        trade_date: date,
+        quantity: float,
+    ) -> None:
+        key = (
+            canonical_stock_code(symbol),
+            self._normalize_market(market),
+            self._normalize_currency(currency),
+        )
+        available_quantity = self._calculate_available_quantity(
+            account_id=account_id,
+            key=key,
+            as_of_date=trade_date,
+        )
+        if available_quantity + EPS < quantity:
+            raise PortfolioOversellError(
+                symbol=key[0],
+                trade_date=trade_date,
+                requested_quantity=quantity,
+                available_quantity=available_quantity,
+            )
+
+    def _calculate_available_quantity(
+        self,
+        *,
+        account_id: int,
+        key: Tuple[str, str, str],
+        as_of_date: date,
+    ) -> float:
+        trades = self.repo.list_trades(account_id, as_of=as_of_date)
+        corporate_actions = self.repo.list_corporate_actions(account_id, as_of=as_of_date)
+
+        events = []
+        for row in corporate_actions:
+            event_key = (
+                canonical_stock_code(row.symbol),
+                self._normalize_market(row.market),
+                self._normalize_currency(row.currency),
+            )
+            if event_key == key:
+                events.append(("corp", row.effective_date, row.id, row))
+        for row in trades:
+            event_key = (
+                canonical_stock_code(row.symbol),
+                self._normalize_market(row.market),
+                self._normalize_currency(row.currency),
+            )
+            if event_key == key:
+                events.append(("trade", row.trade_date, row.id, row))
+
+        # Quantity validation only depends on position-changing events for one symbol.
+        # Cash ledger entries do not affect shares held, so we keep the same corp->trade
+        # ordering as full replay without pulling unrelated cash events into this path.
+        event_priority = {"corp": 1, "trade": 2}
+        events.sort(key=lambda item: (item[1], event_priority[item[0]], item[2]))
+
+        quantity_held = 0.0
+        for event_type, event_date, _, event in events:
+            if event_type == "corp":
+                action_type = (event.action_type or "").strip().lower()
+                if action_type != "split_adjustment":
+                    continue
+                split_ratio = float(event.split_ratio or 0.0)
+                if split_ratio <= 0:
+                    raise ValueError(f"Invalid split_ratio for {key[0]}")
+                if abs(split_ratio - 1.0) <= EPS:
+                    continue
+                quantity_held *= split_ratio
+                continue
+
+            qty = float(event.quantity or 0.0)
+            if qty <= 0:
+                raise ValueError(f"Invalid trade quantity for {key[0]}")
+            side = (event.side or "").strip().lower()
+            if side == "buy":
+                quantity_held += qty
+                continue
+            if side != "sell":
+                raise ValueError(f"Unsupported trade side: {event.side}")
+            if quantity_held + EPS < qty:
+                raise PortfolioOversellError(
+                    symbol=key[0],
+                    trade_date=event_date,
+                    requested_quantity=qty,
+                    available_quantity=quantity_held,
+                )
+            quantity_held -= qty
+            if quantity_held <= EPS:
+                quantity_held = 0.0
+
+        return quantity_held
+
     def _replay_account(self, *, account: Any, as_of_date: date, cost_method: str) -> Dict[str, Any]:
         trades = self.repo.list_trades(account.id, as_of=as_of_date)
         cash_ledger = self.repo.list_cash_ledger(account.id, as_of=as_of_date)
@@ -612,9 +770,19 @@ class PortfolioService:
                     cash_balances[key[2]] += (gross - fee - tax)
                     proceeds_net = gross - fee - tax
                     if cost_method == "fifo":
-                        cost_basis = self._consume_fifo_lots(fifo_lots[key], qty, key[0])
+                        cost_basis = self._consume_fifo_lots(
+                            fifo_lots[key],
+                            qty,
+                            key[0],
+                            event_date,
+                        )
                     else:
-                        cost_basis = self._consume_avg_position(avg_state[key], qty, key[0])
+                        cost_basis = self._consume_avg_position(
+                            avg_state[key],
+                            qty,
+                            key[0],
+                            event_date,
+                        )
                     realized_local = proceeds_net - cost_basis
                     realized_base, stale_realized, _ = self._convert_amount(
                         amount=realized_local,
@@ -829,12 +997,22 @@ class PortfolioService:
         return position_rows, lot_rows, market_value_base, total_cost_base, fx_stale
 
     @staticmethod
-    def _consume_fifo_lots(lots: List[Dict[str, Any]], quantity: float, symbol: str) -> float:
+    def _consume_fifo_lots(
+        lots: List[Dict[str, Any]],
+        quantity: float,
+        symbol: str,
+        trade_date: Optional[date] = None,
+    ) -> float:
         remaining = quantity
         cost_basis = 0.0
         while remaining > EPS:
             if not lots:
-                raise ValueError(f"Oversell detected for {symbol}")
+                raise PortfolioOversellError(
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    requested_quantity=quantity,
+                    available_quantity=quantity - remaining,
+                )
             head = lots[0]
             take = min(remaining, float(head["remaining_quantity"]))
             cost_basis += take * float(head["unit_cost"])
@@ -845,11 +1023,26 @@ class PortfolioService:
         return cost_basis
 
     @staticmethod
-    def _consume_avg_position(state: _AvgState, quantity: float, symbol: str) -> float:
+    def _consume_avg_position(
+        state: _AvgState,
+        quantity: float,
+        symbol: str,
+        trade_date: Optional[date] = None,
+    ) -> float:
         if state.quantity + EPS < quantity:
-            raise ValueError(f"Oversell detected for {symbol}")
+            raise PortfolioOversellError(
+                symbol=symbol,
+                trade_date=trade_date,
+                requested_quantity=quantity,
+                available_quantity=state.quantity,
+            )
         if state.quantity <= EPS:
-            raise ValueError(f"Oversell detected for {symbol}")
+            raise PortfolioOversellError(
+                symbol=symbol,
+                trade_date=trade_date,
+                requested_quantity=quantity,
+                available_quantity=0.0,
+            )
         avg_cost = state.total_cost / state.quantity
         cost_basis = avg_cost * quantity
         state.quantity -= quantity

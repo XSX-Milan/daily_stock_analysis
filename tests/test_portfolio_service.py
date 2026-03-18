@@ -10,10 +10,11 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import select
 
 from src.config import Config
-from src.services.portfolio_service import PortfolioService
-from src.storage import DatabaseManager
+from src.services.portfolio_service import PortfolioConflictError, PortfolioOversellError, PortfolioService
+from src.storage import DatabaseManager, PortfolioDailySnapshot, PortfolioPosition, PortfolioPositionLot, PortfolioTrade
 
 
 class PortfolioServiceTestCase(unittest.TestCase):
@@ -276,6 +277,181 @@ class PortfolioServiceTestCase(unittest.TestCase):
         self.assertAlmostEqual(acc["total_cash"], 1600.0, places=6)
         self.assertAlmostEqual(pos["quantity"], 100.0, places=6)
         self.assertAlmostEqual(pos["avg_cost"], 5.0, places=6)
+
+    def test_sell_oversell_rejected_before_write(self) -> None:
+        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        aid = account["id"]
+
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 2),
+            side="buy",
+            quantity=10,
+            price=10,
+            market="cn",
+            currency="CNY",
+        )
+
+        with self.assertRaises(PortfolioOversellError):
+            self.service.record_trade(
+                account_id=aid,
+                symbol="600519",
+                trade_date=date(2026, 1, 3),
+                side="sell",
+                quantity=20,
+                price=11,
+                market="cn",
+                currency="CNY",
+            )
+
+        trades = self.service.list_trade_events(account_id=aid, page=1, page_size=20)
+        self.assertEqual(len(trades["items"]), 1)
+        self.assertEqual(trades["items"][0]["side"], "buy")
+
+    def test_duplicate_full_close_sell_keeps_conflict_semantics(self) -> None:
+        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        aid = account["id"]
+
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 1),
+            side="buy",
+            quantity=10,
+            price=10,
+            market="cn",
+            currency="CNY",
+        )
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 2),
+            side="sell",
+            quantity=10,
+            price=11,
+            market="cn",
+            currency="CNY",
+            trade_uid="sell-full-close-1",
+        )
+
+        with self.assertRaises(PortfolioConflictError) as ctx:
+            self.service.record_trade(
+                account_id=aid,
+                symbol="600519",
+                trade_date=date(2026, 1, 2),
+                side="sell",
+                quantity=10,
+                price=11,
+                market="cn",
+                currency="CNY",
+                trade_uid="sell-full-close-1",
+            )
+
+        self.assertIn("Duplicate trade_uid", str(ctx.exception))
+
+    def test_backdated_trade_write_invalidates_future_cache(self) -> None:
+        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        aid = account["id"]
+
+        self.service.record_cash_ledger(
+            account_id=aid,
+            event_date=date(2026, 1, 1),
+            direction="in",
+            amount=10000,
+            currency="CNY",
+        )
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 3),
+            side="buy",
+            quantity=10,
+            price=100,
+            market="cn",
+            currency="CNY",
+        )
+        self._save_close("600519", date(2026, 1, 3), 100.0)
+        self.service.get_portfolio_snapshot(account_id=aid, as_of=date(2026, 1, 3), cost_method="fifo")
+
+        with self.db.get_session() as session:
+            snapshot_count = session.execute(
+                select(PortfolioDailySnapshot).where(PortfolioDailySnapshot.account_id == aid)
+            ).scalars().all()
+            position_count = session.execute(
+                select(PortfolioPosition).where(PortfolioPosition.account_id == aid)
+            ).scalars().all()
+            lot_count = session.execute(
+                select(PortfolioPositionLot).where(PortfolioPositionLot.account_id == aid)
+            ).scalars().all()
+        self.assertEqual(len(snapshot_count), 1)
+        self.assertEqual(len(position_count), 1)
+        self.assertEqual(len(lot_count), 1)
+
+        self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 2),
+            side="buy",
+            quantity=5,
+            price=80,
+            market="cn",
+            currency="CNY",
+        )
+
+        with self.db.get_session() as session:
+            snapshot_rows = session.execute(
+                select(PortfolioDailySnapshot).where(PortfolioDailySnapshot.account_id == aid)
+            ).scalars().all()
+            position_rows = session.execute(
+                select(PortfolioPosition).where(PortfolioPosition.account_id == aid)
+            ).scalars().all()
+            lot_rows = session.execute(
+                select(PortfolioPositionLot).where(PortfolioPositionLot.account_id == aid)
+            ).scalars().all()
+        self.assertEqual(len(snapshot_rows), 0)
+        self.assertEqual(len(position_rows), 0)
+        self.assertEqual(len(lot_rows), 0)
+
+    def test_delete_trade_invalidates_cache_and_removes_source_event(self) -> None:
+        account = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")
+        aid = account["id"]
+
+        self.service.record_cash_ledger(
+            account_id=aid,
+            event_date=date(2026, 1, 1),
+            direction="in",
+            amount=10000,
+            currency="CNY",
+        )
+        trade = self.service.record_trade(
+            account_id=aid,
+            symbol="600519",
+            trade_date=date(2026, 1, 2),
+            side="buy",
+            quantity=10,
+            price=100,
+            market="cn",
+            currency="CNY",
+        )
+        self._save_close("600519", date(2026, 1, 2), 100.0)
+        self.service.get_portfolio_snapshot(account_id=aid, as_of=date(2026, 1, 2), cost_method="fifo")
+
+        self.assertTrue(self.service.delete_trade_event(trade["id"]))
+
+        with self.db.get_session() as session:
+            trade_rows = session.execute(
+                select(PortfolioTrade).where(PortfolioTrade.account_id == aid)
+            ).scalars().all()
+            snapshot_rows = session.execute(
+                select(PortfolioDailySnapshot).where(PortfolioDailySnapshot.account_id == aid)
+            ).scalars().all()
+            lot_rows = session.execute(
+                select(PortfolioPositionLot).where(PortfolioPositionLot.account_id == aid)
+            ).scalars().all()
+        self.assertEqual(len(trade_rows), 0)
+        self.assertEqual(len(snapshot_rows), 0)
+        self.assertEqual(len(lot_rows), 0)
 
 
 if __name__ == "__main__":

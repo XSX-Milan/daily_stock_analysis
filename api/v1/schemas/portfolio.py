@@ -82,6 +82,10 @@ class PortfolioEventCreatedResponse(BaseModel):
     id: int
 
 
+class PortfolioDeleteResponse(BaseModel):
+    deleted: int
+
+
 class PortfolioTradeListItem(BaseModel):
     id: int
     account_id: int

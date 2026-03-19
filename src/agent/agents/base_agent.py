@@ -154,6 +154,14 @@ class BaseAgent(ABC):
             {"role": "system", "content": self.system_prompt(ctx)},
         ]
 
+        if self.skill_instructions and self.skill_instructions.strip():
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"[Skill Instructions]\n{self.skill_instructions.strip()}",
+                }
+            )
+
         history = ctx.meta.get("conversation_history")
         if isinstance(history, list):
             for message in history:

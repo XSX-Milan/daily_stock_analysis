@@ -18,6 +18,8 @@ from data_provider.realtime_types import UnifiedRealtimeQuote
 from src.analyzer import GeminiAnalyzer
 from src.config import get_config
 from src.recommendation.constants import (
+    CN_STOP_LOSS_RATIO,
+    CN_TAKE_PROFIT_RATIO,
     DEFAULT_SCORING_WEIGHTS,
     POSITION_MIN_SCORE,
 )
@@ -631,6 +633,7 @@ class RecommendationService:
 
         trend_result = self._build_trend_result(code, daily_df)
         news_items = self._load_recent_news_items(code)
+        enrichment = self._build_scoring_enrichment(daily_df)
 
         scoring_data = StockScoringData(
             region=region,
@@ -638,10 +641,17 @@ class RecommendationService:
             quote=quote,
             news_items=news_items,
             index_data=region_index_data.get(region, {}),
+            volume_trend=enrichment["volume_trend"],
+            volume_ma5_ratio=enrichment["volume_ma5_ratio"],
+            price_vs_ma10=enrichment["price_vs_ma10"],
+            price_vs_ma20=enrichment["price_vs_ma20"],
+            ma_alignment=enrichment["ma_alignment"],
+            trading_days=enrichment["trading_days"],
+            max_hold_days=enrichment["max_hold_days"],
         )
 
         ideal_buy_price, stop_loss, take_profit = self._price_levels(
-            quote.price, trend_result.support_levels
+            quote.price, trend_result.support_levels, region=region
         )
         return {
             "code": code,
@@ -654,6 +664,87 @@ class RecommendationService:
             "take_profit": take_profit,
             "scoring_data": scoring_data,
         }
+
+    def _build_scoring_enrichment(
+        self,
+        daily_df: pd.DataFrame | None,
+    ) -> dict[str, Any]:
+        enrichment: dict[str, Any] = {
+            "volume_trend": "unknown",
+            "volume_ma5_ratio": None,
+            "price_vs_ma10": None,
+            "price_vs_ma20": None,
+            "ma_alignment": "unknown",
+            "trading_days": None,
+            "max_hold_days": 10,
+        }
+        if daily_df is None or daily_df.empty:
+            return enrichment
+
+        trading_days = int(len(daily_df.index))
+        if trading_days > 0:
+            enrichment["trading_days"] = trading_days
+        if trading_days < 5:
+            return enrichment
+
+        close_values: list[float] = []
+        volume_values: list[float] = []
+        if "close" in daily_df.columns:
+            close_values = self._numeric_values(daily_df["close"].tolist())
+        if "volume" in daily_df.columns:
+            volume_values = self._numeric_values(daily_df["volume"].tolist())
+
+        if len(volume_values) >= 5:
+            latest_volume = volume_values[-1]
+            ma5_volume = self._window_mean(volume_values, 5)
+            if ma5_volume > 0:
+                volume_ma5_ratio = latest_volume / ma5_volume
+                enrichment["volume_ma5_ratio"] = round(float(volume_ma5_ratio), 4)
+                enrichment["volume_trend"] = self._classify_volume_trend(
+                    volume_ma5_ratio
+                )
+
+        if len(close_values) >= 10:
+            latest_price = close_values[-1]
+            ma10 = self._window_mean(close_values, 10)
+            if ma10 > 0:
+                enrichment["price_vs_ma10"] = round((latest_price - ma10) / ma10, 4)
+
+        if len(close_values) >= 20:
+            latest_price = close_values[-1]
+            ma20 = self._window_mean(close_values, 20)
+            if ma20 > 0:
+                enrichment["price_vs_ma20"] = round((latest_price - ma20) / ma20, 4)
+
+            ma5 = self._window_mean(close_values, 5)
+            ma10 = self._window_mean(close_values, 10)
+            enrichment["ma_alignment"] = self._classify_ma_alignment(
+                ma5=ma5,
+                ma10=ma10,
+                ma20=ma20,
+            )
+
+        return enrichment
+
+    @staticmethod
+    def _classify_volume_trend(volume_ma5_ratio: float) -> str:
+        if volume_ma5_ratio < 0.8:
+            return "shrinking"
+        if volume_ma5_ratio > 1.2:
+            return "expanding"
+        return "moderate"
+
+    @staticmethod
+    def _classify_ma_alignment(
+        ma5: float,
+        ma10: float,
+        ma20: float,
+    ) -> str:
+        if ma5 > ma10 > ma20:
+            return "bullish"
+        if ma5 < ma10 < ma20:
+            return "bearish"
+        return "mixed"
 
     def _build_region_index_data(
         self,
@@ -764,6 +855,7 @@ class RecommendationService:
     def _price_levels(
         current_price: float | None,
         support_levels: list[float],
+        region: MarketRegion | None = None,
     ) -> tuple[float | None, float | None, float | None]:
         if current_price is None or current_price <= 0:
             return None, None, None
@@ -777,7 +869,12 @@ class RecommendationService:
             ideal_buy = round(current_price * 0.98, 2)
             stop_loss = round(current_price * 0.93, 2)
 
-        take_profit = round(current_price * 1.12, 2)
+        target_region = region or MarketRegion.CN
+        if target_region == MarketRegion.CN:
+            stop_loss = round(current_price * CN_STOP_LOSS_RATIO, 2)
+            take_profit = round(current_price * CN_TAKE_PROFIT_RATIO, 2)
+        else:
+            take_profit = round(current_price * 1.12, 2)
         return round(float(ideal_buy), 2), stop_loss, take_profit
 
     def _load_scoring_weights(self) -> ScoringWeights:

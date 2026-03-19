@@ -22,6 +22,7 @@ from src.agent.protocols import (
 from src.recommendation.constants import (
     BUY_NOW_MIN_SCORE,
     POSITION_MIN_SCORE,
+    RISK_MAX_HOLD_DAYS,
     WAIT_PULLBACK_MIN_SCORE,
 )
 from src.recommendation.models import (
@@ -43,6 +44,13 @@ class StockScoringData:
     quote: UnifiedRealtimeQuote
     news_items: list[dict[str, Any]] = field(default_factory=list)
     index_data: dict[str, dict[str, Any]] = field(default_factory=dict)
+    volume_trend: str | None = None
+    volume_ma5_ratio: float | None = None
+    price_vs_ma10: float | None = None
+    price_vs_ma20: float | None = None
+    ma_alignment: str | None = None
+    trading_days: int | None = None
+    max_hold_days: int | None = None
 
 
 class ScoringEngine:
@@ -210,13 +218,38 @@ class ScoringEngine:
         trend_payload = (
             data.trend_result.to_dict() if hasattr(data.trend_result, "to_dict") else {}
         )
+        technical_payload: dict[str, Any] = dict(trend_payload)
+        for key in ("price_vs_ma10", "price_vs_ma20"):
+            value = getattr(data, key, None)
+            if value is not None:
+                technical_payload[key] = value
+
+        risk_context: dict[str, Any] = {
+            "support_levels": trend_payload.get("support_levels", []),
+            "volume_ratio_5d": trend_payload.get("volume_ratio_5d"),
+            "rsi_status": trend_payload.get("rsi_status"),
+            "nearest_support": None,
+            "support_distance_pct": None,
+            "volume_ratio": quote_payload.get("volume_ratio"),
+            "turnover_rate": quote_payload.get("turnover_rate"),
+        }
+        for key in (
+            "volume_trend",
+            "volume_ma5_ratio",
+            "ma_alignment",
+            "trading_days",
+            "max_hold_days",
+        ):
+            value = getattr(data, key, None)
+            if value is not None:
+                risk_context[key] = value
 
         context_data: dict[str, Any] = {
             "code": code,
             "region": data.region,
             "dimension": dimension,
             "trend_result": trend_payload,
-            "technical": trend_payload,
+            "technical": technical_payload,
             "quote": quote_payload,
             "news_items": list(data.news_items or []),
             "news": list(data.news_items or []),
@@ -229,16 +262,21 @@ class ScoringEngine:
             "pe_ratio": quote_payload.get("pe_ratio"),
             "pb_ratio": quote_payload.get("pb_ratio"),
             "total_mv": quote_payload.get("total_mv"),
-            "risk_context": {
-                "support_levels": trend_payload.get("support_levels", []),
-                "volume_ratio_5d": trend_payload.get("volume_ratio_5d"),
-                "rsi_status": trend_payload.get("rsi_status"),
-                "nearest_support": None,
-                "support_distance_pct": None,
-                "volume_ratio": quote_payload.get("volume_ratio"),
-                "turnover_rate": quote_payload.get("turnover_rate"),
-            },
+            "risk_context": risk_context,
         }
+
+        for key in (
+            "volume_trend",
+            "volume_ma5_ratio",
+            "price_vs_ma10",
+            "price_vs_ma20",
+            "ma_alignment",
+            "trading_days",
+            "max_hold_days",
+        ):
+            value = getattr(data, key, None)
+            if value is not None:
+                context_data[key] = value
 
         stock_name = str(getattr(data.quote, "name", "") or "").strip()
         return AgentContext(
@@ -282,6 +320,8 @@ class ScoringEngine:
             "tool_calls_count": stage_result.tool_calls_count,
             "raw_data": dict(opinion.raw_data or {}),
         }
+        if dimension == "risk":
+            details["max_hold_days"] = RISK_MAX_HOLD_DAYS
         return DimensionScore(
             dimension=dimension, score=score, weight=0.0, details=details
         )

@@ -23,6 +23,27 @@ from src.agent.agents.intel_agent import IntelAgent
 from src.agent.agents.portfolio_agent import PortfolioAgent
 from src.agent.agents.risk_agent import RiskAgent
 from src.agent.agents.technical_agent import TechnicalAgent
+from src.recommendation.constants import (
+    TECHNICAL_BASE_WEIGHT,
+    TECHNICAL_COUNTER_TREND_MA20_BONUS,
+    TECHNICAL_COUNTER_TREND_MA20_MAX,
+    TECHNICAL_COUNTER_TREND_MA60_BONUS,
+    TECHNICAL_COUNTER_TREND_MA60_MAX,
+    TECHNICAL_DELEGATED_WEIGHT,
+    TECHNICAL_HEAVY_VOLUME_PENALTY_HIGH,
+    TECHNICAL_HEAVY_VOLUME_PENALTY_HIGH_SCORE,
+    TECHNICAL_HEAVY_VOLUME_PENALTY_LOW_SCORE,
+    TECHNICAL_HEAVY_VOLUME_PENALTY_MIN,
+    TECHNICAL_MODERATE_VOLUME_DELTA,
+    TECHNICAL_MODERATE_VOLUME_MAX,
+    TECHNICAL_MODERATE_VOLUME_MIN,
+    TECHNICAL_PULLBACK_NEAR_MA10_MAX_ABS,
+    TECHNICAL_SHRINK_VOLUME_BONUS,
+    TECHNICAL_SHRINK_VOLUME_MAX,
+    TECHNICAL_SHRINK_VOLUME_PULLBACK_BONUS,
+)
+from src.recommendation.market_utils import detect_market_region
+from src.recommendation.models import MarketRegion
 from src.stock_analyzer import StockTrendAnalyzer
 
 
@@ -215,13 +236,57 @@ class RecommendationAgent(BaseAgent):
     ) -> float:
         score = trend_score
         quote = self._as_mapping(ctx.get_data("quote") or {})
+        technical = self._as_mapping(ctx.get_data("technical") or {})
+        risk_context = self._as_mapping(ctx.get_data("risk_context") or {})
         volume_ratio = self._to_float(quote.get("volume_ratio"), None)
-        if volume_ratio is not None:
-            if 0.8 <= volume_ratio <= 1.8:
-                score += 5
-            elif volume_ratio > 2.5:
-                score -= 6
-        score = score * 0.8 + self._delegated_score(delegated) * 0.2
+        price_vs_ma10 = self._to_float(technical.get("price_vs_ma10"), None)
+        price_vs_ma20 = self._to_float(technical.get("price_vs_ma20"), None)
+        price_vs_ma60 = self._to_float(technical.get("price_vs_ma60"), None)
+        ma_alignment = str(technical.get("ma_alignment") or "").strip().lower()
+        trading_days = self._to_float(
+            risk_context.get("trading_days", ctx.get_data("trading_days")),
+            None,
+        )
+        has_sufficient_history = trading_days is None or trading_days >= 5
+        if self._is_cn_market_stock(ctx.stock_code):
+            if has_sufficient_history and volume_ratio is not None:
+                if volume_ratio < TECHNICAL_SHRINK_VOLUME_MAX:
+                    if (
+                        price_vs_ma10 is not None
+                        and abs(price_vs_ma10) <= TECHNICAL_PULLBACK_NEAR_MA10_MAX_ABS
+                        and ma_alignment == "bullish"
+                    ):
+                        score += TECHNICAL_SHRINK_VOLUME_PULLBACK_BONUS
+                    else:
+                        score += TECHNICAL_SHRINK_VOLUME_BONUS
+                elif volume_ratio > TECHNICAL_HEAVY_VOLUME_PENALTY_HIGH:
+                    score += TECHNICAL_HEAVY_VOLUME_PENALTY_HIGH_SCORE
+                elif volume_ratio > TECHNICAL_HEAVY_VOLUME_PENALTY_MIN:
+                    score += TECHNICAL_HEAVY_VOLUME_PENALTY_LOW_SCORE
+                elif (
+                    TECHNICAL_MODERATE_VOLUME_MIN
+                    < volume_ratio
+                    < TECHNICAL_MODERATE_VOLUME_MAX
+                ):
+                    score += TECHNICAL_MODERATE_VOLUME_DELTA
+
+            if (
+                has_sufficient_history
+                and price_vs_ma20 is not None
+                and price_vs_ma20 <= TECHNICAL_COUNTER_TREND_MA20_MAX
+            ):
+                score += TECHNICAL_COUNTER_TREND_MA20_BONUS
+            if (
+                has_sufficient_history
+                and price_vs_ma60 is not None
+                and price_vs_ma60 <= TECHNICAL_COUNTER_TREND_MA60_MAX
+            ):
+                score += TECHNICAL_COUNTER_TREND_MA60_BONUS
+
+        score = (
+            score * TECHNICAL_BASE_WEIGHT
+            + self._delegated_score(delegated) * TECHNICAL_DELEGATED_WEIGHT
+        )
         return self._clamp_0_100(score)
 
     def _fundamental_score(
@@ -602,3 +667,10 @@ class RecommendationAgent(BaseAgent):
     @staticmethod
     def _clamp_0_1(value: float) -> float:
         return max(0.0, min(1.0, float(value)))
+
+    @staticmethod
+    def _is_cn_market_stock(stock_code: Optional[str]) -> bool:
+        try:
+            return detect_market_region(str(stock_code or "")) == MarketRegion.CN
+        except Exception:
+            return True

@@ -1,6 +1,6 @@
 import type React from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApiErrorAlert, ConfirmDialog } from '../components/common';
 import { getParsedApiError } from '../api/error';
 import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
@@ -25,6 +25,7 @@ const HomePage: React.FC = () => {
     setError: setStoreError,
   } = useAnalysisStore();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // Set page title
   useEffect(() => {
@@ -61,6 +62,8 @@ const HomePage: React.FC = () => {
 
   // Used to track the current analysis request to avoid race conditions
   const analysisRequestIdRef = useRef<number>(0);
+  const hasHandledStockParamRef = useRef(false);
+  const initialStockParamRef = useRef(searchParams.get('stock'));
 
   // Update task in task list
   const updateTask = useCallback((updatedTask: TaskInfo) => {
@@ -281,9 +284,131 @@ const HomePage: React.FC = () => {
     setShowDeleteConfirm(true);
   }, []);
 
+  const handleAnalyze = useCallback(async (code?: string) => {
+    const codeToAnalyze = code ?? stockCode;
+    const { valid, message, normalized } = validateStockCode(codeToAnalyze);
+    if (!valid) {
+      setInputError(message);
+      return;
+    }
+
+    setInputError(undefined);
+    setDuplicateError(null);
+    setIsAnalyzing(true);
+    setLoading(true);
+    setStoreError(null);
+
+    // Track current request ID
+    const currentRequestId = ++analysisRequestIdRef.current;
+
+    try {
+      // Submit analysis using async mode
+      await analysisApi.analyzeAsync({
+        stockCode: normalized,
+        reportType: 'detailed',
+      });
+
+      // Clear input box
+      if (currentRequestId === analysisRequestIdRef.current) {
+        setStockCode('');
+      }
+
+    } catch (err) {
+      console.error('Analysis failed:', err);
+      if (currentRequestId === analysisRequestIdRef.current) {
+        if (err instanceof DuplicateTaskError) {
+          // Show duplicate task error
+          setDuplicateError(`股票 ${err.stockCode} 正在分析中，请等待完成`);
+        } else {
+          setStoreError(getParsedApiError(err));
+        }
+      }
+    } finally {
+      setIsAnalyzing(false);
+      setLoading(false);
+    }
+  }, [setLoading, setStoreError, stockCode]);
+
+  useEffect(() => {
+    if (hasHandledStockParamRef.current) {
+      return;
+    }
+
+    const stockFromUrl = searchParams.get('stock')?.trim().toUpperCase();
+    const fromParam = searchParams.get('from');
+    const queryIdParam = searchParams.get('query_id');
+    
+    if (!stockFromUrl) {
+      return;
+    }
+
+    hasHandledStockParamRef.current = true;
+    setSearchParams({}, { replace: true });
+    setStockCode(stockFromUrl);
+    setInputError(undefined);
+    setDuplicateError(null);
+
+    const resolveByCacheOrAnalyze = async () => {
+      const { valid, normalized } = validateStockCode(stockFromUrl);
+      
+      if (fromParam === 'rec' && queryIdParam) {
+        try {
+          const report = await historyApi.getDetail(queryIdParam);
+          if (report && report.meta && report.meta.createdAt) {
+            const reportTime = Date.parse(report.meta.createdAt);
+            const now = Date.now();
+            const isRecent = Number.isFinite(reportTime)
+              && reportTime <= now
+              && now - reportTime <= 24 * 60 * 60 * 1000;
+
+            if (isRecent) {
+              setStoreError(null);
+              setSelectedReport(report);
+              return;
+            }
+          }
+        } catch (err) {
+          console.error('Failed to resolve recommendation cache for query_id:', queryIdParam, err);
+        }
+      }
+
+      if (!valid) {
+        await handleAnalyze(stockFromUrl);
+        return;
+      }
+
+      try {
+        const response = await historyApi.getList({
+          stockCode: normalized,
+          page: 1,
+          limit: 1,
+        });
+        const latestItem = response.items[0];
+        const latestTime = latestItem ? Date.parse(latestItem.createdAt) : Number.NaN;
+        const now = Date.now();
+        const isRecent = Number.isFinite(latestTime)
+          && latestTime <= now
+          && now - latestTime <= 24 * 60 * 60 * 1000;
+
+        if (latestItem && isRecent) {
+          const report = await historyApi.getDetail(latestItem.id);
+          setStoreError(null);
+          setSelectedReport(report);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to resolve history cache for URL stock:', err);
+      }
+
+      await handleAnalyze(normalized);
+    };
+
+    void resolveByCacheOrAnalyze();
+  }, [handleAnalyze, searchParams, setSearchParams, setStoreError]);
+
   // Initial load - auto select first item (executes once on mount)
   useEffect(() => {
-    fetchHistory(true);
+    fetchHistory(!initialStockParamRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -326,57 +451,6 @@ const HomePage: React.FC = () => {
     } catch (err) {
       console.error('Failed to fetch report:', err);
       setStoreError(getParsedApiError(err));
-    }
-  };
-
-  // Analyze stock (async mode)
-  const handleAnalyze = async () => {
-    const { valid, message, normalized } = validateStockCode(stockCode);
-    if (!valid) {
-      setInputError(message);
-      return;
-    }
-
-    setInputError(undefined);
-    setDuplicateError(null);
-    setIsAnalyzing(true);
-    setLoading(true);
-    setStoreError(null);
-
-    // Track current request ID
-    const currentRequestId = ++analysisRequestIdRef.current;
-
-    try {
-      // Submit analysis using async mode
-      const response = await analysisApi.analyzeAsync({
-        stockCode: normalized,
-        reportType: 'detailed',
-      });
-
-      // Clear input box
-      if (currentRequestId === analysisRequestIdRef.current) {
-        setStockCode('');
-      }
-
-      // Task submitted, SSE will push updates
-      if ('taskId' in response) {
-        console.log('Task submitted:', response.taskId);
-      } else {
-        console.log('Batch tasks submitted:', response.accepted.map((task) => task.taskId));
-      }
-    } catch (err) {
-      console.error('Analysis failed:', err);
-      if (currentRequestId === analysisRequestIdRef.current) {
-        if (err instanceof DuplicateTaskError) {
-          // Show duplicate task error
-          setDuplicateError(`股票 ${err.stockCode} 正在分析中，请等待完成`);
-        } else {
-          setStoreError(getParsedApiError(err));
-        }
-      }
-    } finally {
-      setIsAnalyzing(false);
-      setLoading(false);
     }
   };
 
@@ -450,7 +524,9 @@ const HomePage: React.FC = () => {
           </div>
           <button
             type="button"
-            onClick={handleAnalyze}
+            onClick={() => {
+              void handleAnalyze();
+            }}
             disabled={!stockCode || isAnalyzing}
             className="btn-primary flex items-center gap-1.5 whitespace-nowrap flex-shrink-0"
           >

@@ -46,7 +46,7 @@ export const historyApi = {
    * 获取历史报告详情
    * @param recordId 分析历史记录主键 ID（使用 ID 而非 query_id，因为 query_id 在批量分析时可能重复）
    */
-  getDetail: async (recordId: number): Promise<AnalysisReport> => {
+  getDetail: async (recordId: number | string): Promise<AnalysisReport> => {
     const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${recordId}`);
     return toCamelCase<AnalysisReport>(response.data);
   },

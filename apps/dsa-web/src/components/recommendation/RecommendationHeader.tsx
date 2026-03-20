@@ -5,12 +5,14 @@ interface RecommendationHeaderProps {
   onRefresh: () => void;
   loading: boolean;
   refreshDisabled: boolean;
+  mode?: 'smart' | 'manual';
 }
 
 export const RecommendationHeader: React.FC<RecommendationHeaderProps> = ({
   onRefresh,
   loading,
   refreshDisabled,
+  mode = 'manual',
 }) => {
   return (
     <div
@@ -36,7 +38,7 @@ export const RecommendationHeader: React.FC<RecommendationHeaderProps> = ({
         isLoading={loading}
         data-testid="manual-refresh-button"
       >
-        推荐
+        {mode === 'smart' ? '智能推荐' : '推荐'}
       </Button>
     </div>
   );

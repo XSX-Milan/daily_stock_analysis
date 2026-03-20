@@ -6,12 +6,14 @@ export interface SectorFiltersProps {
   recommendations: RecommendationItem[];
   selectedSector: string | null;
   onSectorChange: (sector: string | null) => void;
+  hotSectorNames?: string[];
 }
 
 export const SectorFilters: React.FC<SectorFiltersProps> = ({
   recommendations,
   selectedSector,
   onSectorChange,
+  hotSectorNames = [],
 }) => {
   const sectors = useMemo(() => {
     const uniqueSectors = new Set<string>();
@@ -54,20 +56,24 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
         
         {sectors.map((sector) => {
           const isActive = selectedSector === sector;
+          const isHot = hotSectorNames.includes(sector);
           return (
             <button
               key={sector}
               type="button"
               onClick={() => onSectorChange(isActive ? null : sector)}
-              className={`inline-flex items-center px-3 py-1.5 rounded border text-xs transition-colors max-w-[150px] ${
+              className={`inline-flex items-center px-3 py-1.5 rounded border text-xs transition-colors text-left break-words ${
                 isActive
                   ? 'bg-cyan/15 text-cyan border-cyan/50 shadow-[0_0_10px_rgba(0,212,255,0.2)]'
+                  : isHot
+                  ? 'bg-orange-500/10 text-orange-300 border-orange-500/30 hover:bg-orange-500/20 hover:text-orange-200'
                   : 'bg-white/5 text-secondary border-white/10 hover:bg-white/10 hover:text-white'
               }`}
               data-testid={`sector-tag-${sector}`}
               title={sector}
             >
-              <span className="truncate">{sector}</span>
+              <span>{sector}</span>
+              {isHot && <span className="ml-1.5 text-[10px] text-orange-400" title="热门板块">🔥</span>}
             </button>
           );
         })}

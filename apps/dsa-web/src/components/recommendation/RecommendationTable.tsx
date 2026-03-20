@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { Sparkles } from 'lucide-react';
 import type { RecommendationItem, ScoringWeights } from '../../types/recommendation';
 import { RecommendationPriority, MarketRegion } from '../../types/recommendation';
 import { ScoreBar } from './ScoreBar';
@@ -158,42 +159,66 @@ export const RecommendationTable: React.FC<RecommendationTableProps> = ({
               const priorityVariant = PRIORITY_BADGE_VARIANT[item.priority] ?? 'default';
               const price = item.idealBuyPrice ?? item.suggestedBuy;
 
+              const showSummaryRow = item.aiRefined || item.aiSummary;
+
               return (
-                <tr
-                  key={`${item.stockCode}-${item.updatedAt}`}
-                  className="border-b border-white/5 bg-card hover:bg-elevated transition-colors cursor-pointer"
-                  onClick={() => onRowClick?.(item.stockCode)}
-                  data-testid={`table-row-${item.stockCode}`}
-                >
-                  <td className="px-3 py-2 text-secondary whitespace-nowrap">
-                    {item.sector ? (
-                      <div className="flex items-center gap-1.5">
-                        <svg className="w-3 h-3 text-cyan-400/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
-                        </svg>
-                        <span>{item.sector}</span>
-                      </div>
-                    ) : (
-                      <span className="text-white/30">-</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-cyan-400 whitespace-nowrap">{item.stockCode}</td>
-                  <td className="px-3 py-2 max-w-[10rem] truncate" title={item.stockName || item.name}>
-                    <div className="text-white">{item.stockName || item.name || '--'}</div>
-                    <div className="text-[10px] text-muted mt-0.5">{marketLabel}</div>
-                  </td>
-                  <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{formatPrice(price)}</td>
-                  <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{item.compositeScore.toFixed(1)}</td>
-                  <td className="px-3 py-2 w-48">
-                    <ScoreBar scores={item.scores} compositeScore={item.compositeScore} weights={weights} />
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.suggestedBuy)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.takeProfit)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.stopLoss)}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    <Badge variant={priorityVariant}>{priorityLabel}</Badge>
-                  </td>
-                </tr>
+                <React.Fragment key={`${item.stockCode}-${item.updatedAt}`}>
+                  <tr
+                    className={`bg-card hover:bg-elevated transition-colors cursor-pointer ${
+                      showSummaryRow ? '' : 'border-b border-white/5'
+                    }`}
+                    onClick={() => onRowClick?.(item.stockCode)}
+                    data-testid={`table-row-${item.stockCode}`}
+                  >
+                    <td className="px-3 py-2 text-secondary whitespace-nowrap">
+                      {item.sector ? (
+                        <div className="flex items-center gap-1.5">
+                          <svg className="w-3 h-3 text-cyan-400/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                          </svg>
+                          <span>{item.sector}</span>
+                        </div>
+                      ) : (
+                        <span className="text-white/30">-</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-cyan-400 whitespace-nowrap">{item.stockCode}</td>
+                    <td className="px-3 py-2 max-w-[10rem] truncate" title={item.stockName || item.name}>
+                      <div className="text-white">{item.stockName || item.name || '--'}</div>
+                      <div className="text-[10px] text-muted mt-0.5">{marketLabel}</div>
+                    </td>
+                    <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{formatPrice(price)}</td>
+                    <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{item.compositeScore.toFixed(1)}</td>
+                    <td className="px-3 py-2 w-48">
+                      <ScoreBar scores={item.scores} compositeScore={item.compositeScore} weights={weights} />
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.suggestedBuy)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.takeProfit)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.stopLoss)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <Badge variant={priorityVariant}>{priorityLabel}</Badge>
+                    </td>
+                  </tr>
+                  {showSummaryRow && (
+                    <tr
+                      className="border-b border-white/5 bg-card hover:bg-elevated transition-colors cursor-pointer"
+                      onClick={() => onRowClick?.(item.stockCode)}
+                    >
+                      <td colSpan={10} className="px-3 pb-3 pt-0 text-xs whitespace-normal">
+                        <div className="flex items-start gap-1.5 text-muted">
+                          <Sparkles className="w-3.5 h-3.5 text-cyan-400/70 shrink-0 mt-0.5" />
+                          <span className="line-clamp-2" title={item.aiSummary || ''}>
+                            {item.aiSummary ? (
+                              <span className="text-secondary/90">{item.aiSummary}</span>
+                            ) : (
+                              <span className="text-white/30 italic">AI 已精炼评分，暂无详细摘要</span>
+                            )}
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               );
             })}
           </tbody>

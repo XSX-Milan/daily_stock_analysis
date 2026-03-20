@@ -30,6 +30,8 @@ export interface RecommendationItem {
   idealBuyPrice?: number | null;
   stopLoss?: number | null;
   takeProfit?: number | null;
+  aiSummary?: string | null;
+  aiRefined?: boolean;
   updatedAt: string;
 }
 

@@ -87,22 +87,28 @@ class RecommendationService:
 
     def __init__(self, config: Any = None) -> None:
         self.config = config or get_config()
+        self._recommendation_config_map = self._read_recommendation_config_map()
 
-        def _config_int(*keys: str, default: int) -> int:
-            for key in keys:
-                if hasattr(self.config, key):
-                    value = getattr(self.config, key)
-                    if value is not None:
-                        try:
-                            return int(value)
-                        except (TypeError, ValueError):
-                            continue
+        def _config_int(
+            *keys: str,
+            env_keys: tuple[str, ...] = (),
+            default: int,
+        ) -> int:
+            value = self._recommendation_config_value(keys, env_keys, default)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
             return int(default)
 
         self.max_workers = max(1, int(getattr(self.config, "max_workers", 4)))
         self.refresh_skip_seconds = max(
             0,
-            _config_int("recommend_refresh_skip_seconds", default=300),
+            _config_int(
+                "recommend_refresh_skip_seconds",
+                env_keys=("RECOMMEND_REFRESH_SKIP_SECONDS",),
+                default=300,
+            ),
         )
 
         self.fetcher_manager = DataFetcherManager()
@@ -119,6 +125,10 @@ class RecommendationService:
                     "recommend_top_n_per_sector",
                     "recommend_sector_top_n",
                     "recommendation_top_n_per_sector",
+                    env_keys=(
+                        "RECOMMEND_TOP_N_PER_SECTOR",
+                        "RECOMMEND_SECTOR_TOP_N",
+                    ),
                     default=5,
                 ),
             ),
@@ -127,6 +137,7 @@ class RecommendationService:
                 _config_int(
                     "recommend_max_universe",
                     "recommendation_max_universe",
+                    env_keys=("RECOMMEND_MAX_UNIVERSE",),
                     default=200,
                 ),
             ),
@@ -137,6 +148,10 @@ class RecommendationService:
                 "recommend_top_n_per_sector",
                 "recommend_sector_top_n",
                 "recommendation_top_n_per_sector",
+                env_keys=(
+                    "RECOMMEND_TOP_N_PER_SECTOR",
+                    "RECOMMEND_SECTOR_TOP_N",
+                ),
                 default=5,
             ),
         )
@@ -144,7 +159,11 @@ class RecommendationService:
             0,
             min(
                 100,
-                _config_int("recommend_score_threshold_ai", default=60),
+                _config_int(
+                    "recommend_score_threshold_ai",
+                    env_keys=("RECOMMEND_SCORE_THRESHOLD_AI",),
+                    default=60,
+                ),
             ),
         )
         self.db_manager = DatabaseManager.get_instance()
@@ -1412,7 +1431,6 @@ class RecommendationService:
         return round(float(ideal_buy), 2), stop_loss, take_profit
 
     def _load_scoring_weights(self) -> ScoringWeights:
-        config_map = ConfigManager().read_config_map()
         payload: dict[str, int] = {}
 
         for (
@@ -1421,11 +1439,10 @@ class RecommendationService:
             attr_name,
             default_value,
         ) in self.SCORING_WEIGHT_CONFIG_MAPPING:
-            runtime_value = getattr(self.config, attr_name, None)
-            env_value = config_map.get(env_key)
-            resolved = self._coerce_weight_value(runtime_value)
-            if resolved is None:
-                resolved = self._coerce_weight_value(env_value)
+            preferred_value = self._recommendation_config_value(
+                (attr_name,), (env_key,)
+            )
+            resolved = self._coerce_weight_value(preferred_value)
             payload[field_name] = default_value if resolved is None else resolved
 
         try:
@@ -1478,6 +1495,46 @@ class RecommendationService:
         if candidate < 0 or candidate > 100:
             return None
         return candidate
+
+    def _read_recommendation_config_map(self) -> dict[str, Any]:
+        try:
+            return ConfigManager().read_config_map()
+        except Exception as exc:
+            logger.warning("Failed to read recommendation config map: %s", exc)
+            return {}
+
+    def _recommendation_config_value(
+        self,
+        attr_names: tuple[str, ...],
+        env_keys: tuple[str, ...],
+        default: Any = None,
+    ) -> Any:
+        if not isinstance(self.config, Config):
+            explicit_value = self._config_attr_value(attr_names)
+            if explicit_value is not None:
+                return explicit_value
+
+        for env_key in env_keys:
+            env_value = self._recommendation_config_map.get(env_key)
+            if env_value is None:
+                continue
+            if isinstance(env_value, str) and not env_value.strip():
+                continue
+            return env_value
+
+        runtime_value = self._config_attr_value(attr_names)
+        if runtime_value is not None:
+            return runtime_value
+        return default
+
+    def _config_attr_value(self, attr_names: tuple[str, ...]) -> Any:
+        for attr_name in attr_names:
+            if not hasattr(self.config, attr_name):
+                continue
+            value = getattr(self.config, attr_name)
+            if value is not None:
+                return value
+        return None
 
     @staticmethod
     def _numeric_values(values: list[Any]) -> list[float]:

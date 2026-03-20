@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 
 import pandas as pd
 
-from src.config import Config, setup_env
+from src.config import Config, get_config, setup_env
 from src.core.config_manager import ConfigManager
 from src.recommendation.models import (
     CompositeScore,
@@ -1329,6 +1329,89 @@ class RecommendationServiceTestCase(unittest.TestCase):
             temp_dir.cleanup()
 
         self.assertEqual(loaded, ScoringWeights())
+
+    def test_init_prefers_env_recommendation_values_when_config_is_stale(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        env_path = os.path.join(temp_dir.name, ".env")
+        Path(env_path).write_text(
+            "\n".join(
+                [
+                    "RECOMMEND_WEIGHT_TECHNICAL=35",
+                    "RECOMMEND_WEIGHT_FUNDAMENTAL=20",
+                    "RECOMMEND_WEIGHT_SENTIMENT=20",
+                    "RECOMMEND_WEIGHT_MACRO=15",
+                    "RECOMMEND_WEIGHT_RISK=10",
+                    "RECOMMEND_REFRESH_SKIP_SECONDS=180",
+                    "RECOMMEND_TOP_N_PER_SECTOR=7",
+                    "RECOMMEND_MAX_UNIVERSE=150",
+                    "RECOMMEND_SCORE_THRESHOLD_AI=75",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        previous_env_file = os.environ.get("ENV_FILE")
+        os.environ["ENV_FILE"] = env_path
+        Config.reset_instance()
+        setup_env(override=True)
+        stale_config = get_config()
+
+        stale_config.recommend_weight_technical = 30
+        stale_config.recommend_weight_fundamental = 25
+        stale_config.recommend_weight_sentiment = 20
+        stale_config.recommend_weight_macro = 15
+        stale_config.recommend_weight_risk = 10
+        stale_config.recommend_refresh_skip_seconds = 300
+        stale_config.recommend_top_n_per_sector = 5
+        stale_config.recommend_max_universe = 200
+        stale_config.recommend_score_threshold_ai = 60
+
+        db_manager = MagicMock()
+
+        try:
+            with (
+                patch("src.services.recommendation_service.DataFetcherManager"),
+                patch("src.services.recommendation_service.StockTrendAnalyzer"),
+                patch("src.services.recommendation_service.GeminiAnalyzer"),
+                patch("src.services.recommendation_service.RecommendationRepository"),
+                patch("src.services.recommendation_service.WatchlistService"),
+                patch("src.services.recommendation_service.SectorScannerService"),
+                patch(
+                    "src.services.recommendation_service.ScoringEngine",
+                    side_effect=self._build_scoring_engine_stub,
+                ),
+                patch(
+                    "src.services.recommendation_service.DatabaseManager.get_instance",
+                    return_value=db_manager,
+                ),
+            ):
+                from src.services.recommendation_service import RecommendationService
+
+                service = RecommendationService(config=stale_config)
+                loaded = service.get_scoring_weights()
+        finally:
+            if previous_env_file is None:
+                os.environ.pop("ENV_FILE", None)
+            else:
+                os.environ["ENV_FILE"] = previous_env_file
+            Config.reset_instance()
+            setup_env(override=True)
+            temp_dir.cleanup()
+
+        self.assertEqual(
+            loaded,
+            ScoringWeights(
+                technical=35,
+                fundamental=20,
+                sentiment=20,
+                macro=15,
+                risk=10,
+            ),
+        )
+        self.assertEqual(service.refresh_skip_seconds, 180)
+        self.assertEqual(service.recommend_top_n_per_sector, 7)
+        self.assertEqual(service.recommend_score_threshold_ai, 75)
 
 
 if __name__ == "__main__":

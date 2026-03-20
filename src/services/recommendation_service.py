@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import asdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -16,7 +15,8 @@ from sqlalchemy import desc, select
 from data_provider import DataFetcherManager
 from data_provider.realtime_types import UnifiedRealtimeQuote
 from src.analyzer import GeminiAnalyzer
-from src.config import get_config
+from src.config import Config, get_config, setup_env
+from src.core.config_manager import ConfigManager
 from src.recommendation.constants import (
     CN_STOP_LOSS_RATIO,
     CN_TAKE_PROFIT_RATIO,
@@ -24,29 +24,66 @@ from src.recommendation.constants import (
     POSITION_MIN_SCORE,
 )
 from src.recommendation.sector_cache import SectorCacheService
-from src.recommendation.db_models import ScoringConfigRecord
 from src.recommendation.engine import ScoringEngine, StockScoringData
 from src.recommendation.market_utils import detect_market_region, get_market_indices
 from src.recommendation.models import (
+    CompositeScore,
+    DimensionScore,
     MarketRegion,
+    RecommendationPriority,
     ScoringWeights,
     SectorInfo,
     StockRecommendation,
 )
 from src.repositories.recommendation_repo import RecommendationRepository
-from src.services.sector_scanner_service import SectorScannerService
+from src.services.sector_scanner_service import (
+    SectorScannerService,
+    _OVERSEAS_SECTOR_FALLBACK,
+)
 from src.services.watchlist_service import WatchlistService
 from src.stock_analyzer import TrendAnalysisResult, StockTrendAnalyzer
-from src.storage import DatabaseManager, NewsIntel
+from src.storage import AnalysisHistory, DatabaseManager, NewsIntel
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _RecommendationAnalysisBridgeResult:
+    code: str
+    name: str
+    sentiment_score: int
+    operation_advice: str
+    trend_prediction: str
+    analysis_summary: str
+    raw_payload: dict[str, Any]
+    sniper_points: dict[str, float | None]
+    data_sources: str = "recommendation_refresh"
+    raw_response: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.raw_payload)
+
+    def get_sniper_points(self) -> dict[str, float | None]:
+        return dict(self.sniper_points)
 
 
 class RecommendationService:
     """Coordinate data collection, scoring, persistence, and watchlist access."""
 
-    SCORING_WEIGHTS_KEY = "recommendation.scoring_weights"
     SECTOR_CACHE_TYPE = "industry"
+    AUTO_REFRESH_SECTOR_LIMIT = 3
+    SCORING_WEIGHT_CONFIG_MAPPING: tuple[tuple[str, str, str, int], ...] = (
+        ("technical", "RECOMMEND_WEIGHT_TECHNICAL", "recommend_weight_technical", 30),
+        (
+            "fundamental",
+            "RECOMMEND_WEIGHT_FUNDAMENTAL",
+            "recommend_weight_fundamental",
+            25,
+        ),
+        ("sentiment", "RECOMMEND_WEIGHT_SENTIMENT", "recommend_weight_sentiment", 20),
+        ("macro", "RECOMMEND_WEIGHT_MACRO", "recommend_weight_macro", 15),
+        ("risk", "RECOMMEND_WEIGHT_RISK", "recommend_weight_risk", 10),
+    )
 
     def __init__(self, config: Any = None) -> None:
         self.config = config or get_config()
@@ -136,25 +173,207 @@ class RecommendationService:
     ) -> list[StockRecommendation]:
         """Refresh recommendations for sector scan results and watchlist stocks."""
         target_region = self._parse_market_region(market)
-        target_sector = str(sector or "").strip()
+        if sector is None:
+            target_sectors, used_ranking_fallback = (
+                self._resolve_auto_refresh_sectors_with_source(target_region)
+            )
+            if not target_sectors:
+                return []
+
+            if target_region == MarketRegion.CN and used_ranking_fallback:
+                persisted_items = self._fallback_cn_generic_persisted_recommendations(
+                    limit=self._cn_auto_generic_fallback_limit()
+                )
+                if not persisted_items:
+                    return []
+                logger.info(
+                    "Skipping CN sector constituent loop for ranking-derived fallback sectors; returning bounded persisted CN recommendations directly | count=%d",
+                    len(persisted_items),
+                )
+                return persisted_items
+
+            merged_sector_by_code: dict[str, str] = {}
+            merged_codes: list[str] = []
+            for target_sector in target_sectors:
+                try:
+                    sector_codes, sector_by_code = self._collect_sector_universe(
+                        target_region=target_region,
+                        target_sector=target_sector,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to refresh recommendations for market=%s sector=%s: %s",
+                        target_region.value,
+                        target_sector,
+                        exc,
+                    )
+                    continue
+
+                for code in sector_codes:
+                    if code in merged_sector_by_code:
+                        continue
+                    merged_codes.append(code)
+                    merged_sector_by_code[code] = (
+                        sector_by_code.get(code) or target_sector
+                    )
+
+            if not merged_codes and target_region == MarketRegion.CN:
+                persisted_items = self._fallback_cn_generic_persisted_recommendations(
+                    limit=self._cn_auto_generic_fallback_limit()
+                )
+                if persisted_items:
+                    logger.info(
+                        "Returning bounded persisted CN recommendations directly after live universe fallback exhaustion | count=%d",
+                        len(persisted_items),
+                    )
+                    return persisted_items
+
+            if not merged_codes:
+                return []
+
+            return self.refresh_stocks(
+                merged_codes,
+                sector_by_code=merged_sector_by_code,
+                force=force,
+            )
+
+        target_sector = str(sector).strip()
         if not target_sector:
             raise ValueError("sector is required for recommendation refresh")
 
+        return self._refresh_all_for_sector(
+            force=force,
+            target_region=target_region,
+            target_sector=target_sector,
+        )
+
+    def _resolve_auto_refresh_sectors(self, region: MarketRegion) -> list[str]:
+        sectors, _ = self._resolve_auto_refresh_sectors_with_source(region)
+        return sectors
+
+    def _resolve_auto_refresh_sectors_with_source(
+        self,
+        region: MarketRegion,
+    ) -> tuple[list[str], bool]:
+        if region == MarketRegion.CN:
+            fallback = self._fallback_cn_hot_sector_names(
+                limit=self.AUTO_REFRESH_SECTOR_LIMIT
+            )
+            if fallback:
+                logger.info(
+                    "Using CN ranking-derived sector fallback candidates: %s",
+                    ", ".join(fallback),
+                )
+            return fallback, True
+
+        fallback = _OVERSEAS_SECTOR_FALLBACK.get(region.value, {})
+        sectors: list[str] = []
+        seen_universes: set[tuple[str, ...]] = set()
+
+        for raw_sector, raw_codes in fallback.items():
+            normalized_sector = str(raw_sector or "").strip()
+            if not normalized_sector:
+                continue
+
+            normalized_codes = {
+                str(code or "").strip().upper()
+                for code in (raw_codes or [])
+                if str(code or "").strip()
+            }
+            if normalized_codes:
+                universe_key = tuple(sorted(normalized_codes))
+            else:
+                universe_key = (f"__sector__:{normalized_sector.casefold()}",)
+
+            if universe_key in seen_universes:
+                continue
+
+            seen_universes.add(universe_key)
+            sectors.append(normalized_sector)
+
+        return sectors, False
+
+    def _fallback_cn_hot_sector_names(self, limit: int) -> list[str]:
+        target_limit = max(1, int(limit))
+        fetcher = getattr(self.sector_scanner_service, "data_fetcher", None)
+        if fetcher is None:
+            return []
+
+        try:
+            top_sectors, _ = fetcher.get_sector_rankings(target_limit)
+        except Exception as exc:
+            logger.warning("Failed to fetch CN sector rankings: %s", exc)
+            return []
+
+        sectors: list[str] = []
+        for item in top_sectors or []:
+            if isinstance(item, dict):
+                sector_name = item.get("name") or item.get("sector")
+            else:
+                sector_name = item
+            normalized = str(sector_name or "").strip()
+            if not normalized or normalized in sectors:
+                continue
+            sectors.append(normalized)
+            if len(sectors) >= target_limit:
+                break
+        return sectors
+
+    def _refresh_all_for_sector(
+        self,
+        force: bool,
+        target_region: MarketRegion,
+        target_sector: str,
+    ) -> list[StockRecommendation]:
+        combined_codes, sector_by_code = self._collect_sector_universe(
+            target_region=target_region,
+            target_sector=target_sector,
+        )
+        return self.refresh_stocks(
+            combined_codes,
+            sector_by_code=sector_by_code,
+            force=force,
+            market=target_region,
+            sector=target_sector,
+        )
+
+    def _collect_sector_universe(
+        self,
+        target_region: MarketRegion,
+        target_sector: str,
+    ) -> tuple[list[str], dict[str, str]]:
         sector_by_code: dict[str, str] = {}
-        sector_codes: list[str] = []
+        normalized_sector_codes: list[str] = []
 
         sector_codes = self.sector_scanner_service.get_sector_stocks(
             target_sector,
             limit=self.sector_scanner_service.max_universe,
             market=target_region.value,
         )
+        if not sector_codes and target_region == MarketRegion.CN:
+            sector_codes = self._fallback_sector_codes_from_persisted_recommendations(
+                target_region=target_region,
+                target_sector=target_sector,
+                limit=self.sector_scanner_service.max_universe,
+            )
+            if sector_codes:
+                logger.info(
+                    "Using persisted recommendation fallback codes for market=%s sector=%s | count=%d",
+                    target_region.value,
+                    target_sector,
+                    len(sector_codes),
+                )
         if not sector_codes and target_region != MarketRegion.CN:
             logger.info(
                 "Sector scan returned no codes for market=%s, sector=%s",
                 target_region.value,
                 target_sector,
             )
-        for code in sector_codes:
+        for raw_code in sector_codes:
+            code = str(raw_code or "").strip()
+            if not code:
+                continue
+            normalized_sector_codes.append(code)
             sector_by_code[code] = target_sector
             self.sector_cache_service.save_sector_info(
                 code,
@@ -174,15 +393,102 @@ class RecommendationService:
             target_sector,
             sector_by_code=sector_by_code,
         )
-        for code in scoped_watchlist_codes:
+        normalized_watchlist_codes = [
+            normalized
+            for normalized in (
+                str(raw_code or "").strip() for raw_code in scoped_watchlist_codes
+            )
+            if normalized
+        ]
+        for code in normalized_watchlist_codes:
             sector_by_code.setdefault(code, target_sector)
-        combined_codes = list(dict.fromkeys([*sector_codes, *scoped_watchlist_codes]))
-        return self.refresh_stocks(
-            combined_codes,
-            sector_by_code=sector_by_code,
-            force=force,
-            market=target_region,
-            sector=target_sector,
+        combined_codes = list(
+            dict.fromkeys([*normalized_sector_codes, *normalized_watchlist_codes])
+        )
+        return combined_codes, sector_by_code
+
+    def _fallback_sector_codes_from_persisted_recommendations(
+        self,
+        target_region: MarketRegion,
+        target_sector: str,
+        limit: int,
+    ) -> list[str]:
+        try:
+            rows = self.recommendation_repo.get_list(
+                sector=target_sector,
+                region=target_region,
+                limit=max(1, int(limit)),
+                offset=0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load persisted recommendation fallback for market=%s sector=%s: %s",
+                target_region.value,
+                target_sector,
+                exc,
+            )
+            return []
+
+        fallback_codes: list[str] = []
+        for item in rows:
+            code = str(getattr(item, "code", "") or "").strip()
+            if not code:
+                continue
+            if detect_market_region(code) != target_region:
+                continue
+            if code in fallback_codes:
+                continue
+            fallback_codes.append(code)
+            if len(fallback_codes) >= max(1, int(limit)):
+                break
+        return fallback_codes
+
+    def _fallback_cn_generic_persisted_recommendations(
+        self,
+        limit: int,
+    ) -> list[StockRecommendation]:
+        target_limit = max(1, int(limit))
+        try:
+            rows = self.recommendation_repo.get_list(
+                region=MarketRegion.CN,
+                limit=target_limit,
+                offset=0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to load generic CN persisted recommendation fallback: %s",
+                exc,
+            )
+            return []
+
+        fallback_items: list[StockRecommendation] = []
+        seen_codes: set[str] = set()
+        for item in rows:
+            code = str(getattr(item, "code", "") or "").strip()
+            if not code:
+                continue
+            if detect_market_region(code) != MarketRegion.CN:
+                continue
+            if code in seen_codes:
+                continue
+
+            seen_codes.add(code)
+            fallback_items.append(item)
+            if len(fallback_items) >= target_limit:
+                break
+
+        return fallback_items
+
+    def _cn_auto_generic_fallback_limit(self) -> int:
+        # Emergency fail-open path after sector constituents and sector-scoped persisted
+        # candidates are both unavailable. One sector-worth of candidates is enough to
+        # keep refresh functional without pulling a broad CN pool.
+        return max(
+            1,
+            min(
+                int(self.sector_scanner_service.max_universe),
+                int(self.recommend_top_n_per_sector),
+            ),
         )
 
     def refresh_stocks(
@@ -234,9 +540,15 @@ class RecommendationService:
                 deduplicated_codes,
             )
 
+        normalized_sector_input = {
+            str(code).strip(): str(value).strip()
+            for code, value in (sector_by_code or {}).items()
+            if str(code).strip() and str(value).strip()
+        }
+
         resolved_sector_by_code = self._resolve_sector_mapping(
             codes_to_refresh,
-            sector_by_code,
+            normalized_sector_input,
         )
 
         region_index_data = self._build_region_index_data(codes_to_refresh)
@@ -281,7 +593,7 @@ class RecommendationService:
         score_filtered_inputs = self._select_score_first_inputs(
             score_inputs=score_inputs,
             payload_by_code=payload_by_code,
-            score_first_enabled=sector is not None,
+            score_first_enabled=(sector is not None) or bool(normalized_sector_input),
             market=market,
             sector=sector,
         )
@@ -296,6 +608,32 @@ class RecommendationService:
             )
 
         composite_scores = self.scoring_engine.score_batch(score_filtered_inputs)
+        composite_score_by_code: dict[str, Any] = {}
+        for composite_score in composite_scores:
+            score_code = str(getattr(composite_score, "code", "") or "").strip()
+            if not score_code:
+                logger.warning(
+                    "Skipped composite score without stock code during recommendation refresh"
+                )
+                continue
+            if score_code not in payload_by_code:
+                logger.warning(
+                    "Skipped composite score for unknown stock code during recommendation refresh: %s",
+                    score_code,
+                )
+                continue
+            composite_score_by_code[score_code] = composite_score
+
+        if not composite_score_by_code:
+            return self._sort_recommendations(
+                [
+                    cached_by_code[code]
+                    for code in deduplicated_codes
+                    if code in cached_by_code
+                ],
+                deduplicated_codes,
+            )
+
         normalized_sector_by_code = {
             str(code).strip(): value
             for code, value in resolved_sector_by_code.items()
@@ -303,7 +641,10 @@ class RecommendationService:
         }
 
         new_recommendations: list[StockRecommendation] = []
-        for (code, _), composite_score in zip(score_filtered_inputs, composite_scores):
+        for code, _ in score_filtered_inputs:
+            composite_score = composite_score_by_code.get(code)
+            if composite_score is None:
+                continue
             self._apply_ai_threshold_override(code, composite_score)
             payload = payload_by_code[code]
             sector_value = normalized_sector_by_code.get(code) or payload.get("sector")
@@ -340,7 +681,192 @@ class RecommendationService:
             ordered_items, deduplicated_codes
         )
         self.recommendation_repo.save_batch(sorted_new_recommendations)
+        try:
+            self._bridge_recommendations_to_analysis_history(sorted_new_recommendations)
+        except Exception as exc:
+            logger.warning(
+                "Failed to bridge recommendation refresh into analysis_history: %s",
+                exc,
+            )
         return merged_recommendations
+
+    def _bridge_recommendations_to_analysis_history(
+        self,
+        recommendations: list[StockRecommendation],
+    ) -> None:
+        if not recommendations:
+            return
+
+        query_date = datetime.utcnow().strftime("%Y%m%d")
+        records: list[AnalysisHistory] = []
+
+        for recommendation in recommendations:
+            bridge_result = self._build_analysis_bridge_result(recommendation)
+            query_id = f"rec_{recommendation.code}_{query_date}"
+            sniper_points = self.db_manager._extract_sniper_points(bridge_result)
+            raw_result = self.db_manager._build_raw_result(bridge_result)
+
+            records.append(
+                AnalysisHistory(
+                    query_id=query_id,
+                    code=bridge_result.code,
+                    name=bridge_result.name,
+                    report_type="recommendation",
+                    sentiment_score=bridge_result.sentiment_score,
+                    operation_advice=bridge_result.operation_advice,
+                    trend_prediction=bridge_result.trend_prediction,
+                    analysis_summary=bridge_result.analysis_summary,
+                    raw_result=self.db_manager._safe_json_dumps(raw_result),
+                    news_content=None,
+                    context_snapshot=None,
+                    ideal_buy=sniper_points.get("ideal_buy"),
+                    secondary_buy=sniper_points.get("secondary_buy"),
+                    stop_loss=sniper_points.get("stop_loss"),
+                    take_profit=sniper_points.get("take_profit"),
+                    created_at=datetime.now(),
+                )
+            )
+
+        if not records:
+            return
+
+        with self.db_manager.session_scope() as session:
+            session.add_all(records)
+
+    def _build_analysis_bridge_result(
+        self,
+        recommendation: StockRecommendation,
+    ) -> _RecommendationAnalysisBridgeResult:
+        sentiment_score = self._extract_sentiment_score(
+            recommendation.composite_score,
+        )
+        operation_advice = self._map_operation_advice(recommendation.composite_score)
+        trend_prediction = self._derive_trend_prediction(recommendation.composite_score)
+        analysis_summary = str(recommendation.composite_score.ai_summary or "").strip()
+        if not analysis_summary:
+            analysis_summary = (
+                f"{operation_advice}，综合评分 {recommendation.composite_score.total_score:.2f}，"
+                f"趋势判断：{trend_prediction}。"
+            )
+
+        sniper_points = {
+            "ideal_buy": recommendation.ideal_buy_price,
+            "secondary_buy": None,
+            "stop_loss": recommendation.stop_loss,
+            "take_profit": recommendation.take_profit,
+        }
+
+        raw_payload = {
+            "source": "recommendation_refresh",
+            "code": recommendation.code,
+            "name": recommendation.name,
+            "region": recommendation.region.value,
+            "sector": recommendation.sector,
+            "current_price": recommendation.current_price,
+            "sentiment_score": sentiment_score,
+            "operation_advice": operation_advice,
+            "trend_prediction": trend_prediction,
+            "analysis_summary": analysis_summary,
+            "recommendation": {
+                "total_score": recommendation.composite_score.total_score,
+                "priority": {
+                    "name": recommendation.composite_score.priority.name,
+                    "label": recommendation.composite_score.priority.value,
+                },
+                "dimension_scores": self._serialize_dimension_scores(
+                    recommendation.composite_score.dimension_scores
+                ),
+                "ai_refined": bool(recommendation.composite_score.ai_refined),
+                "ai_summary": recommendation.composite_score.ai_summary,
+            },
+            "sniper_points": sniper_points,
+            "generated_at": (
+                recommendation.updated_at.isoformat()
+                if recommendation.updated_at
+                else datetime.utcnow().isoformat()
+            ),
+        }
+
+        return _RecommendationAnalysisBridgeResult(
+            code=recommendation.code,
+            name=recommendation.name,
+            sentiment_score=sentiment_score,
+            operation_advice=operation_advice,
+            trend_prediction=trend_prediction,
+            analysis_summary=analysis_summary,
+            raw_payload=raw_payload,
+            sniper_points=sniper_points,
+            raw_response={
+                "dashboard": {"battle_plan": {"sniper_points": sniper_points}}
+            },
+        )
+
+    @staticmethod
+    def _serialize_dimension_scores(
+        dimension_scores: list[DimensionScore],
+    ) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for item in dimension_scores:
+            payload.append(
+                {
+                    "dimension": item.dimension,
+                    "score": item.score,
+                    "weight": item.weight,
+                    "details": item.details,
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _extract_sentiment_score(composite_score: CompositeScore) -> int:
+        sentiment_dimension = next(
+            (
+                item
+                for item in composite_score.dimension_scores
+                if str(item.dimension).strip().casefold() == "sentiment"
+            ),
+            None,
+        )
+        if sentiment_dimension is None:
+            return 50
+
+        try:
+            value = float(sentiment_dimension.score)
+        except (TypeError, ValueError):
+            return 50
+        if pd.isna(value):
+            return 50
+        value = max(0.0, min(100.0, value))
+        return int(round(value))
+
+    @staticmethod
+    def _map_operation_advice(composite_score: CompositeScore) -> str:
+        mapping = {
+            RecommendationPriority.BUY_NOW: "强烈买入",
+            RecommendationPriority.POSITION: "建仓",
+            RecommendationPriority.WAIT_PULLBACK: "观望",
+            RecommendationPriority.NO_ENTRY: "回避",
+        }
+        return mapping.get(composite_score.priority, "观望")
+
+    @staticmethod
+    def _derive_trend_prediction(composite_score: CompositeScore) -> str:
+        summary = str(composite_score.ai_summary or "").strip().casefold()
+        if summary:
+            bearish_markers = ("看空", "下跌", "bearish", "strong sell", "sell")
+            bullish_markers = ("看多", "上涨", "bullish", "strong buy", "buy")
+            if any(marker in summary for marker in bearish_markers):
+                return "看空"
+            if any(marker in summary for marker in bullish_markers):
+                return "看多"
+
+        fallback = {
+            RecommendationPriority.BUY_NOW: "看多",
+            RecommendationPriority.POSITION: "偏多",
+            RecommendationPriority.WAIT_PULLBACK: "震荡",
+            RecommendationPriority.NO_ENTRY: "观望",
+        }
+        return fallback.get(composite_score.priority, "观望")
 
     def _select_score_first_inputs(
         self,
@@ -623,10 +1149,16 @@ class RecommendationService:
         region_index_data: dict[MarketRegion, dict[str, dict[str, float]]],
     ) -> dict[str, Any] | None:
         region = detect_market_region(code)
-        name = self.fetcher_manager.get_stock_name(code) or code
-
         quote = self.fetcher_manager.get_realtime_quote(code)
         daily_df = self._get_daily_frame(code, days=90)
+
+        quote_name = str(getattr(quote, "name", "") or "").strip()
+        if quote_name:
+            name = quote_name
+        else:
+            name = (
+                self.fetcher_manager.get_stock_name(code, allow_realtime=False) or code
+            )
 
         if quote is None:
             quote = self._build_fallback_quote(code, name, daily_df)
@@ -878,40 +1410,72 @@ class RecommendationService:
         return round(float(ideal_buy), 2), stop_loss, take_profit
 
     def _load_scoring_weights(self) -> ScoringWeights:
-        with self.db_manager.session_scope() as session:
-            record = session.execute(
-                select(ScoringConfigRecord).where(
-                    ScoringConfigRecord.key == self.SCORING_WEIGHTS_KEY
-                )
-            ).scalar_one_or_none()
+        config_map = ConfigManager().read_config_map()
+        payload: dict[str, int] = {}
 
-            if record is None:
-                return DEFAULT_SCORING_WEIGHTS
+        for (
+            field_name,
+            env_key,
+            attr_name,
+            default_value,
+        ) in self.SCORING_WEIGHT_CONFIG_MAPPING:
+            runtime_value = getattr(self.config, attr_name, None)
+            env_value = config_map.get(env_key)
+            resolved = self._coerce_weight_value(runtime_value)
+            if resolved is None:
+                resolved = self._coerce_weight_value(env_value)
+            payload[field_name] = default_value if resolved is None else resolved
 
-            payload = record.get_value_dict() or {}
-            try:
-                return ScoringWeights(**payload)
-            except Exception:
-                return DEFAULT_SCORING_WEIGHTS
+        try:
+            return ScoringWeights(**payload)
+        except Exception:
+            return DEFAULT_SCORING_WEIGHTS
 
     def _persist_scoring_weights(self, weights: ScoringWeights) -> None:
-        payload_json = json.dumps(asdict(weights), ensure_ascii=False)
-        with self.db_manager.session_scope() as session:
-            record = session.execute(
-                select(ScoringConfigRecord).where(
-                    ScoringConfigRecord.key == self.SCORING_WEIGHTS_KEY
-                )
-            ).scalar_one_or_none()
+        updates = [
+            (env_key, str(getattr(weights, field_name)))
+            for field_name, env_key, _, _ in self.SCORING_WEIGHT_CONFIG_MAPPING
+        ]
+        ConfigManager().apply_updates(
+            updates=updates,
+            sensitive_keys=set(),
+            mask_token="******",
+        )
 
-            if record is None:
-                session.add(
-                    ScoringConfigRecord(
-                        key=self.SCORING_WEIGHTS_KEY,
-                        value_json=payload_json,
-                    )
-                )
-            else:
-                setattr(record, "value_json", payload_json)
+        for field_name, _, attr_name, _ in self.SCORING_WEIGHT_CONFIG_MAPPING:
+            setattr(self.config, attr_name, int(getattr(weights, field_name)))
+
+        try:
+            Config.reset_instance()
+            setup_env(override=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to reload runtime config after weight update: %s", exc
+            )
+
+    @staticmethod
+    def _coerce_weight_value(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+
+        if isinstance(value, int):
+            candidate = value
+        elif isinstance(value, float):
+            if not float(value).is_integer():
+                return None
+            candidate = int(value)
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                candidate = int(text)
+            except (TypeError, ValueError):
+                return None
+
+        if candidate < 0 or candidate > 100:
+            return None
+        return candidate
 
     @staticmethod
     def _numeric_values(values: list[Any]) -> list[float]:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import Optional
 
 from src.agent.agents.base_agent import BaseAgent
@@ -91,6 +92,12 @@ from your search results. Do NOT invent risks.
             parts.append(f"\n[Existing intel data]\n{json.dumps(ctx.get_data('intel_opinion'), ensure_ascii=False, default=str)}")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _has_preloaded_news_context(ctx: AgentContext) -> bool:
+        if not isinstance(ctx.data, Mapping):
+            return False
+        return "news_items" in ctx.data or "news" in ctx.data
 
     def post_process(self, ctx: AgentContext, raw_text: str) -> Optional[AgentOpinion]:
         parsed = try_parse_json(raw_text)

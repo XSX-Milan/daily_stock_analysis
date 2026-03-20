@@ -99,9 +99,126 @@ class FakeWatchlistService:
         return len(self.items) < before
 
 
+class FakeSectorRankingFetcher:
+    def __init__(self) -> None:
+        self.raise_error = False
+        self.top_sectors: list[dict[str, object]] = [
+            {"name": "半导体", "change_pct": 2.4},
+            {"name": "人工智能", "change_pct": 1.7},
+            {"name": "证券", "change_pct": 0.8},
+        ]
+
+    def get_sector_rankings(self, n: int = 5) -> tuple[list[dict[str, object]], list]:
+        if self.raise_error:
+            raise RuntimeError("sector rankings failed")
+        return list(self.top_sectors)[:n], []
+
+
+class FakeSectorScannerService:
+    def __init__(self) -> None:
+        self.raise_error = False
+        self.data_fetcher = FakeSectorRankingFetcher()
+        self.scan_result: list[tuple[str, list[str]]] = [
+            ("半导体", ["688001", "688002", "688003"]),
+            ("人工智能", ["300001", "300002"]),
+            ("证券", ["600030"]),
+            ("煤炭", ["601898", "600188"]),
+        ]
+
+    def scan_sectors(self) -> list[tuple[str, list[str]]]:
+        if self.raise_error:
+            raise RuntimeError("sector scanner failed")
+        return list(self.scan_result)
+
+
+class FakeRecommendationRepo:
+    def __init__(self) -> None:
+        self.last_history_market: str | None = None
+        self.last_history_limit: int | None = None
+        self.last_history_offset: int | None = None
+        self.last_count_region: str | None = None
+        self.history_rows: list[dict[str, object]] = [
+            {
+                "code": "600519",
+                "name": "Name-600519",
+                "sector": "Consumer",
+                "composite_score": 77.5,
+                "priority": "POSITION",
+                "recommendation_date": "2026-03-19",
+                "ai_summary": "稳健趋势",
+                "region": "CN",
+                "market": "CN",
+            },
+            {
+                "code": "AAPL",
+                "name": "Name-AAPL",
+                "sector": "Tech",
+                "composite_score": 86.0,
+                "priority": "BUY_NOW",
+                "recommendation_date": "2026-03-18",
+                "ai_summary": "动量延续",
+                "region": "US",
+                "market": "US",
+            },
+        ]
+
+    def get_history_list(
+        self,
+        market: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, object]]:
+        self.last_history_market = market
+        self.last_history_limit = limit
+        self.last_history_offset = offset
+
+        rows = list(self.history_rows)
+        if market is not None:
+            normalized_market = str(market).strip().upper()
+            rows = [
+                row
+                for row in rows
+                if str(row.get("market", "")).strip().upper() == normalized_market
+            ]
+        return rows[offset : offset + limit]
+
+    def delete_by_stock(self, code: str) -> int:
+        normalized_code = str(code).strip()
+        if not normalized_code:
+            return 0
+
+        before = len(self.history_rows)
+        self.history_rows = [
+            row
+            for row in self.history_rows
+            if str(row.get("code", "")) != normalized_code
+        ]
+        return before - len(self.history_rows)
+
+    def get_count(
+        self,
+        priority: str | None = None,
+        sector: str | None = None,
+        region: str | None = None,
+    ) -> int:
+        _ = (priority, sector)
+        self.last_count_region = region
+        rows = list(self.history_rows)
+        if region is not None:
+            normalized_region = str(region).strip().upper()
+            rows = [
+                row
+                for row in rows
+                if str(row.get("market", "")).strip().upper() == normalized_region
+            ]
+        return len(rows)
+
+
 class FakeRecommendationService:
     def __init__(self) -> None:
         self.watchlist_service = FakeWatchlistService()
+        self.sector_scanner_service = FakeSectorScannerService()
+        self.recommendation_repo = FakeRecommendationRepo()
         self.weights = ScoringWeights()
         self.last_refresh_all_force = False
         self.last_refresh_stocks_force = False
@@ -216,19 +333,31 @@ class RecommendationApiTestCase(unittest.TestCase):
         ).get("message", "")
         self.assertIn("market is required", missing_market_message)
 
-        missing_sector = self.client.post(
-            "/api/v1/recommendation/refresh", json={"market": "US"}
+        market_only = self.client.post(
+            "/api/v1/recommendation/refresh", json={"market": "CN"}
         )
-        self.assertEqual(missing_sector.status_code, 400)
-        missing_sector_payload = missing_sector.json()
-        missing_sector_error = missing_sector_payload.get(
-            "detail", missing_sector_payload
-        ).get("error", "")
-        self.assertEqual(missing_sector_error, "validation_error")
-        missing_sector_message = missing_sector_payload.get(
-            "detail", missing_sector_payload
+        self.assertEqual(market_only.status_code, 200)
+        market_only_data = market_only.json()
+        self.assertEqual(market_only_data["total"], 2)
+        self.assertEqual(self.fake_service.last_refresh_all_market, "CN")
+        self.assertIsNone(self.fake_service.last_refresh_all_sector)
+
+        null_sector = self.client.post(
+            "/api/v1/recommendation/refresh", json={"market": "US", "sector": None}
+        )
+        self.assertEqual(null_sector.status_code, 200)
+        self.assertEqual(self.fake_service.last_refresh_all_market, "US")
+        self.assertIsNone(self.fake_service.last_refresh_all_sector)
+
+        blank_sector = self.client.post(
+            "/api/v1/recommendation/refresh", json={"market": "US", "sector": "   "}
+        )
+        self.assertEqual(blank_sector.status_code, 400)
+        blank_sector_payload = blank_sector.json()
+        blank_sector_message = blank_sector_payload.get(
+            "detail", blank_sector_payload
         ).get("message", "")
-        self.assertIn("sector is required", missing_sector_message)
+        self.assertIn("sector is required", blank_sector_message)
 
         full_response = self.client.post(
             "/api/v1/recommendation/refresh",
@@ -300,6 +429,158 @@ class RecommendationApiTestCase(unittest.TestCase):
         param_names = {item["name"] for item in params}
         self.assertNotIn("limit", param_names)
 
+    def test_history_get_and_delete_endpoints(self) -> None:
+        page_one_response = self.client.get(
+            "/api/v1/recommendation/history", params={"limit": 1, "offset": 0}
+        )
+        self.assertEqual(page_one_response.status_code, 200)
+        page_one_payload = page_one_response.json()
+        page_one_rows = page_one_payload["items"]
+        self.assertEqual(len(page_one_rows), 1)
+        self.assertEqual(page_one_rows[0]["code"], "600519")
+        self.assertEqual(page_one_payload["total"], 2)
+        self.assertEqual(
+            page_one_payload["filters"], {"market": None, "limit": 1, "offset": 0}
+        )
+        self.assertEqual(
+            self.fake_service.recommendation_repo.last_history_market, None
+        )
+        self.assertEqual(self.fake_service.recommendation_repo.last_history_limit, 1)
+        self.assertEqual(self.fake_service.recommendation_repo.last_history_offset, 0)
+        self.assertEqual(self.fake_service.recommendation_repo.last_count_region, None)
+
+        page_two_response = self.client.get(
+            "/api/v1/recommendation/history", params={"limit": 1, "offset": 1}
+        )
+        self.assertEqual(page_two_response.status_code, 200)
+        page_two_payload = page_two_response.json()
+        page_two_rows = page_two_payload["items"]
+        self.assertEqual(len(page_two_rows), 1)
+        self.assertEqual(page_two_rows[0]["code"], "AAPL")
+        self.assertEqual(page_two_payload["total"], 2)
+        self.assertEqual(
+            page_two_payload["filters"], {"market": None, "limit": 1, "offset": 1}
+        )
+        self.assertNotEqual(page_one_rows[0]["code"], page_two_rows[0]["code"])
+        self.assertEqual(page_one_payload["total"], page_two_payload["total"])
+        self.assertEqual(self.fake_service.recommendation_repo.last_history_limit, 1)
+        self.assertEqual(self.fake_service.recommendation_repo.last_history_offset, 1)
+        self.assertEqual(self.fake_service.recommendation_repo.last_count_region, None)
+
+        filtered_history_response = self.client.get(
+            "/api/v1/recommendation/history",
+            params={"market": "CN", "limit": 10, "offset": 0},
+        )
+        self.assertEqual(filtered_history_response.status_code, 200)
+        filtered_payload = filtered_history_response.json()
+        filtered_rows = filtered_payload["items"]
+        self.assertEqual(len(filtered_rows), 1)
+        self.assertEqual(filtered_rows[0]["market"], "CN")
+        self.assertEqual(filtered_payload["total"], 1)
+        self.assertEqual(
+            filtered_payload["filters"], {"market": "CN", "limit": 10, "offset": 0}
+        )
+        self.assertEqual(
+            self.fake_service.recommendation_repo.last_history_market, "CN"
+        )
+        self.assertEqual(self.fake_service.recommendation_repo.last_history_limit, 10)
+        self.assertEqual(self.fake_service.recommendation_repo.last_history_offset, 0)
+        self.assertEqual(self.fake_service.recommendation_repo.last_count_region, "CN")
+
+        delete_response = self.client.delete("/api/v1/recommendation/history/600519")
+        self.assertEqual(delete_response.status_code, 200)
+        delete_payload = delete_response.json()
+        self.assertEqual(delete_payload["status"], "ok")
+        self.assertEqual(delete_payload["deleted"], 1)
+
+        missing_delete_response = self.client.delete(
+            "/api/v1/recommendation/history/NOT_FOUND"
+        )
+        self.assertEqual(missing_delete_response.status_code, 200)
+        self.assertEqual(missing_delete_response.json()["deleted"], 0)
+
+        blank_delete_response = self.client.delete(
+            "/api/v1/recommendation/history/%20%20"
+        )
+        self.assertEqual(blank_delete_response.status_code, 200)
+        self.assertEqual(blank_delete_response.json()["deleted"], 0)
+
+    def test_hot_sectors_cn_endpoint(self) -> None:
+        self.fake_service.sector_scanner_service.scan_result = [
+            ("半导体", ["688001", "688002", "688003"]),
+            ("人工智能", ["300001", "300002"]),
+            ("证券", ["600030"]),
+            ("煤炭", ["601898", "600188"]),
+        ]
+        self.fake_service.sector_scanner_service.data_fetcher.top_sectors = [
+            {"name": "半导体", "change_pct": "2.6"},
+            {"name": "人工智能", "change_pct": 1.3},
+            {"name": "证券"},
+        ]
+
+        response = self.client.get(
+            "/api/v1/recommendation/hot-sectors", params={"market": "CN"}
+        )
+        self.assertEqual(response.status_code, 200)
+
+        payload = response.json()
+        sectors = payload["sectors"]
+        self.assertEqual(len(sectors), 3)
+        self.assertEqual(
+            [item["name"] for item in sectors], ["半导体", "人工智能", "证券"]
+        )
+        self.assertEqual([item["stock_count"] for item in sectors], [3, 2, 1])
+        self.assertAlmostEqual(sectors[0]["change_pct"], 2.6)
+        self.assertAlmostEqual(sectors[1]["change_pct"], 1.3)
+        self.assertIsNone(sectors[2]["change_pct"])
+
+    def test_hot_sectors_overseas_fallback_endpoint(self) -> None:
+        for market in ("HK", "US"):
+            response = self.client.get(
+                "/api/v1/recommendation/hot-sectors", params={"market": market}
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            sectors = payload["sectors"]
+
+            expected = recommendation_endpoint._OVERSEAS_SECTOR_FALLBACK[market]
+            expected_names = list(expected.keys())
+            self.assertEqual([item["name"] for item in sectors], expected_names)
+            self.assertEqual(
+                [item["stock_count"] for item in sectors],
+                [len(expected[name]) for name in expected_names],
+            )
+            self.assertTrue(all(item["change_pct"] is None for item in sectors))
+
+    def test_hot_sectors_cn_scanner_failure_uses_ranking_fallback(self) -> None:
+        self.fake_service.sector_scanner_service.raise_error = True
+        scanner_failed = self.client.get(
+            "/api/v1/recommendation/hot-sectors", params={"market": "CN"}
+        )
+        self.assertEqual(scanner_failed.status_code, 200)
+        sectors = scanner_failed.json()["sectors"]
+        self.assertEqual(
+            [item["name"] for item in sectors], ["半导体", "人工智能", "证券"]
+        )
+        self.assertTrue(all(item["stock_count"] is None for item in sectors))
+
+    def test_hot_sectors_cn_fetcher_failure_keeps_scanned_names(self) -> None:
+        self.fake_service.sector_scanner_service.raise_error = False
+        self.fake_service.sector_scanner_service.scan_result = [
+            ("半导体", ["688001", "688002", "688003"]),
+            ("人工智能", ["300001", "300002"]),
+        ]
+        self.fake_service.sector_scanner_service.data_fetcher.raise_error = True
+
+        fetcher_failed = self.client.get(
+            "/api/v1/recommendation/hot-sectors", params={"market": "CN"}
+        )
+        self.assertEqual(fetcher_failed.status_code, 200)
+        sectors = fetcher_failed.json()["sectors"]
+        self.assertEqual([item["name"] for item in sectors], ["半导体", "人工智能"])
+        self.assertEqual([item["stock_count"] for item in sectors], [3, 2])
+        self.assertTrue(all(item["change_pct"] is None for item in sectors))
+
     def test_weights_get_put_and_sum_validation(self) -> None:
         get_response = self.client.get("/api/v1/recommendation/weights")
         self.assertEqual(get_response.status_code, 200)
@@ -318,6 +599,10 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertEqual(put_response.status_code, 200)
         self.assertEqual(put_response.json()["technical"], 35)
 
+        get_after_put_response = self.client.get("/api/v1/recommendation/weights")
+        self.assertEqual(get_after_put_response.status_code, 200)
+        self.assertEqual(get_after_put_response.json()["technical"], 35)
+
         invalid_response = self.client.put(
             "/api/v1/recommendation/weights",
             json={
@@ -329,6 +614,10 @@ class RecommendationApiTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(invalid_response.status_code, 422)
+
+        openapi = self.client.get("/openapi.json").json()
+        put_operation = openapi["paths"]["/api/v1/recommendation/weights"]["put"]
+        self.assertTrue(put_operation["deprecated"])
 
     def test_watchlist_get_post_delete_endpoints(self) -> None:
         post_response = self.client.post(

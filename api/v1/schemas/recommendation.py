@@ -44,6 +44,18 @@ class RecommendationListResponse(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
+class RecommendationHistoryFiltersResponse(BaseModel):
+    market: str | None = Field(None, description="Market filter")
+    limit: int = Field(..., ge=0, description="Page size")
+    offset: int = Field(..., ge=0, description="Offset")
+
+
+class RecommendationHistoryListResponse(BaseModel):
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    total: int = Field(..., ge=0)
+    filters: RecommendationHistoryFiltersResponse
+
+
 class PrioritySummaryResponse(BaseModel):
     """Response schema for recommendation priority counters."""
 
@@ -51,6 +63,20 @@ class PrioritySummaryResponse(BaseModel):
     position: int = Field(0, ge=0)
     wait_pullback: int = Field(0, ge=0)
     no_entry: int = Field(0, ge=0)
+
+
+class HotSectorItemResponse(BaseModel):
+    """Response schema for one hot-sector item."""
+
+    name: str = Field(..., description="Sector name")
+    change_pct: float | None = Field(None, description="Sector change percentage")
+    stock_count: int | None = Field(None, description="Stock count in sector")
+
+
+class HotSectorListResponse(BaseModel):
+    """Response schema for hot-sector list queries."""
+
+    sectors: list[HotSectorItemResponse] = Field(default_factory=list)
 
 
 class ScoringWeightsRequest(BaseModel):

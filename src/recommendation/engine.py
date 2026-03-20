@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -33,6 +34,9 @@ from src.recommendation.models import (
     ScoringWeights,
 )
 from src.stock_analyzer import TrendAnalysisResult
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -98,6 +102,7 @@ class ScoringEngine:
             priority=self._priority_for_score(total_score),
             dimension_scores=dimension_scores,
         )
+        setattr(composite_score, "code", str(code).strip())
 
         if total_score >= POSITION_MIN_SCORE and self._ai_refiner is not None:
             self._apply_ai_refinement(code, composite_score)
@@ -107,29 +112,63 @@ class ScoringEngine:
     def score_batch(
         self, stocks: list[tuple[str, StockScoringData]]
     ) -> list[CompositeScore]:
-        """Score a batch of stocks in input order."""
+        """Score a batch of stocks and return successful results in input order."""
         if not stocks:
             return []
 
+        failures: dict[str, str] = {}
         worker_count = min(self._batch_max_workers, len(stocks))
         if worker_count <= 1:
-            return [self.score_stock(code, data) for code, data in stocks]
+            output: list[CompositeScore] = []
+            for code, data in stocks:
+                try:
+                    output.append(self.score_stock(code, data))
+                except Exception as exc:
+                    failures[code] = str(exc)
+                    logger.warning("Failed to score stock %s in batch: %s", code, exc)
+            if output:
+                return output
+            raise RuntimeError(
+                self._build_all_failed_message(
+                    total_count=len(stocks), failures=failures
+                )
+            )
 
         results: list[CompositeScore | None] = [None] * len(stocks)
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_map = {
-                executor.submit(self.score_stock, code, data): index
+                executor.submit(self.score_stock, code, data): (index, code)
                 for index, (code, data) in enumerate(stocks)
             }
             for future in as_completed(future_map):
-                results[future_map[future]] = future.result()
+                index, code = future_map[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    failures[code] = str(exc)
+                    logger.warning("Failed to score stock %s in batch: %s", code, exc)
 
-        output: list[CompositeScore] = []
-        for item in results:
-            if item is None:
-                raise RuntimeError("Batch scoring produced an incomplete result set")
-            output.append(item)
-        return output
+        output = [item for item in results if item is not None]
+        if output:
+            return output
+
+        raise RuntimeError(
+            self._build_all_failed_message(total_count=len(stocks), failures=failures)
+        )
+
+    @staticmethod
+    def _build_all_failed_message(total_count: int, failures: Mapping[str, str]) -> str:
+        if not failures:
+            return f"Batch scoring failed for all {total_count} stocks"
+
+        ordered_errors = [
+            f"{code}: {reason or 'unknown error'}" for code, reason in failures.items()
+        ]
+        preview = "; ".join(ordered_errors[:3])
+        remainder = len(ordered_errors) - 3
+        if remainder > 0:
+            preview = f"{preview}; ... (+{remainder} more)"
+        return f"Batch scoring failed for all {total_count} stocks. Errors: {preview}"
 
     def _dimension_scores(
         self, code: str, data: StockScoringData
@@ -142,10 +181,19 @@ class ScoringEngine:
                 f"Missing recommendation agents for dimensions: {', '.join(missing)}"
             )
 
-        return [
-            self._score_dimension(code, data, dimension)
-            for dimension in self._REQUIRED_DIMENSIONS
-        ]
+        dimension_scores: list[DimensionScore] = []
+        shared_delegate_results: list[dict[str, Any]] | None = None
+        for dimension in self._REQUIRED_DIMENSIONS:
+            dimension_score, delegate_results = self._score_dimension(
+                code=code,
+                data=data,
+                dimension=dimension,
+                delegated_results=shared_delegate_results,
+            )
+            dimension_scores.append(dimension_score)
+            if delegate_results:
+                shared_delegate_results = delegate_results
+        return dimension_scores
 
     def _build_agents(
         self,
@@ -176,37 +224,68 @@ class ScoringEngine:
         code: str,
         data: StockScoringData,
         dimension: str,
-    ) -> DimensionScore:
+        delegated_results: list[dict[str, Any]] | None = None,
+    ) -> tuple[DimensionScore, list[dict[str, Any]]]:
         ctx = self._build_agent_context(code=code, data=data, dimension=dimension)
+        if delegated_results:
+            ctx.set_data("_recommendation_delegate_results", list(delegated_results))
         agent = self._agents[dimension]
 
         try:
             stage_result = agent.run(ctx)
         except Exception as exc:
-            return self._fallback_dimension_score(
-                dimension=dimension,
-                reason=f"agent-run-error: {exc}",
+            return (
+                self._fallback_dimension_score(
+                    dimension=dimension,
+                    reason=f"agent-run-error: {exc}",
+                ),
+                self._extract_recommendation_delegate_results(ctx),
             )
 
+        delegate_results = self._extract_recommendation_delegate_results(ctx)
+
         if stage_result.status != StageStatus.COMPLETED:
-            return self._fallback_dimension_score(
-                dimension=dimension,
-                reason=stage_result.error or "agent-stage-not-completed",
-                stage_result=stage_result,
+            return (
+                self._fallback_dimension_score(
+                    dimension=dimension,
+                    reason=stage_result.error or "agent-stage-not-completed",
+                    stage_result=stage_result,
+                ),
+                delegate_results,
             )
 
         if stage_result.opinion is None:
-            return self._fallback_dimension_score(
-                dimension=dimension,
-                reason="missing-agent-opinion",
-                stage_result=stage_result,
+            return (
+                self._fallback_dimension_score(
+                    dimension=dimension,
+                    reason="missing-agent-opinion",
+                    stage_result=stage_result,
+                ),
+                delegate_results,
             )
 
-        return self._opinion_to_dimension_score(
-            dimension=dimension,
-            opinion=stage_result.opinion,
-            stage_result=stage_result,
+        return (
+            self._opinion_to_dimension_score(
+                dimension=dimension,
+                opinion=stage_result.opinion,
+                stage_result=stage_result,
+            ),
+            delegate_results,
         )
+
+    @staticmethod
+    def _extract_recommendation_delegate_results(
+        ctx: AgentContext,
+    ) -> list[dict[str, Any]]:
+        raw = ctx.get_data("_recommendation_delegate_results")
+        if not isinstance(raw, list):
+            return []
+
+        delegates: list[dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, Mapping):
+                delegates.append(dict(item))
+        return delegates
 
     def _build_agent_context(
         self,

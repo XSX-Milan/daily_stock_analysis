@@ -434,7 +434,6 @@ class RecommendationAgent(BaseAgent):
             TechnicalAgent(
                 self.tool_registry, self.llm_adapter, self.skill_instructions
             ),
-            IntelAgent(self.tool_registry, self.llm_adapter, self.skill_instructions),
             RiskAgent(self.tool_registry, self.llm_adapter, self.skill_instructions),
             DecisionAgent(
                 self.tool_registry, self.llm_adapter, self.skill_instructions
@@ -443,6 +442,15 @@ class RecommendationAgent(BaseAgent):
                 self.tool_registry, self.llm_adapter, self.skill_instructions
             ),
         ]
+        if not self._has_preloaded_news_context(ctx):
+            main_agents.insert(
+                1,
+                IntelAgent(
+                    self.tool_registry,
+                    self.llm_adapter,
+                    self.skill_instructions,
+                ),
+            )
 
         delegated: list[dict[str, Any]] = []
         for agent in main_agents:
@@ -461,6 +469,12 @@ class RecommendationAgent(BaseAgent):
             delegated.append(self._normalize_delegate_opinion(stage.opinion))
 
         return delegated
+
+    @staticmethod
+    def _has_preloaded_news_context(ctx: AgentContext) -> bool:
+        if not isinstance(ctx.data, Mapping):
+            return False
+        return "news_items" in ctx.data or "news" in ctx.data
 
     def _collect_context_delegate_fallback(
         self, ctx: AgentContext

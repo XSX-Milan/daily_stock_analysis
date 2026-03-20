@@ -8,6 +8,7 @@ from api.v1.schemas.recommendation import RecommendationResponse
 from data_provider.realtime_types import UnifiedRealtimeQuote
 from src.agent.agents.base_agent import BaseAgent
 from src.agent.agents.recommendation_agent import RecommendationAgent
+from src.agent.agents.risk_agent import RiskAgent
 from src.agent.protocols import AgentContext, AgentOpinion, StageResult, StageStatus
 from src.recommendation.engine import ScoringEngine, StockScoringData
 from src.recommendation.models import (
@@ -443,6 +444,198 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
                 messages[1]["content"],
                 f"[Skill Instructions]\n{skill_text}",
             )
+
+    def test_preloaded_news_items_skip_intel_delegation(self) -> None:
+        ran_agents: list[str] = []
+
+        def _delegate_cls(name: str):
+            class _DelegateAgent(BaseAgent):
+                agent_name = name
+
+                def system_prompt(self, ctx: AgentContext) -> str:
+                    del ctx
+                    return f"{name} system prompt"
+
+                def build_user_message(self, ctx: AgentContext) -> str:
+                    del ctx
+                    return f"{name} user prompt"
+
+                def run(self, ctx: AgentContext, progress_callback=None) -> StageResult:
+                    del ctx
+                    del progress_callback
+                    ran_agents.append(name)
+                    return StageResult(
+                        stage_name=name,
+                        status=StageStatus.COMPLETED,
+                        opinion=AgentOpinion(
+                            agent_name=name,
+                            signal="hold",
+                            confidence=0.6,
+                            reasoning="ok",
+                        ),
+                    )
+
+            return _DelegateAgent
+
+        with (
+            patch(
+                "src.agent.agents.recommendation_agent.TechnicalAgent",
+                _delegate_cls("technical"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.IntelAgent",
+                _delegate_cls("intel"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.RiskAgent",
+                _delegate_cls("risk"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.DecisionAgent",
+                _delegate_cls("decision"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.PortfolioAgent",
+                _delegate_cls("portfolio"),
+            ),
+            patch.object(
+                RecommendationAgent,
+                "_calibrate_confidence",
+                side_effect=lambda raw_confidence, stock_code: raw_confidence,
+            ),
+        ):
+            agent = RecommendationAgent(
+                Mock(),
+                Mock(),
+                dimension="technical",
+            )
+            result = agent.run(
+                AgentContext(
+                    query="test",
+                    stock_code="AAPL",
+                    data={
+                        "news_items": [],
+                        "quote": {"volume_ratio": 1.0},
+                        "technical": {},
+                        "risk_context": {"trading_days": 30},
+                    },
+                )
+            )
+
+        self.assertEqual(result.status, StageStatus.COMPLETED)
+        self.assertEqual(ran_agents, ["technical", "risk", "decision", "portfolio"])
+        self.assertNotIn("intel", ran_agents)
+
+    def test_missing_preloaded_news_keeps_intel_delegation(self) -> None:
+        ran_agents: list[str] = []
+
+        def _delegate_cls(name: str):
+            class _DelegateAgent(BaseAgent):
+                agent_name = name
+
+                def system_prompt(self, ctx: AgentContext) -> str:
+                    del ctx
+                    return f"{name} system prompt"
+
+                def build_user_message(self, ctx: AgentContext) -> str:
+                    del ctx
+                    return f"{name} user prompt"
+
+                def run(self, ctx: AgentContext, progress_callback=None) -> StageResult:
+                    del ctx
+                    del progress_callback
+                    ran_agents.append(name)
+                    return StageResult(
+                        stage_name=name,
+                        status=StageStatus.COMPLETED,
+                        opinion=AgentOpinion(
+                            agent_name=name,
+                            signal="hold",
+                            confidence=0.6,
+                            reasoning="ok",
+                        ),
+                    )
+
+            return _DelegateAgent
+
+        with (
+            patch(
+                "src.agent.agents.recommendation_agent.TechnicalAgent",
+                _delegate_cls("technical"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.IntelAgent",
+                _delegate_cls("intel"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.RiskAgent",
+                _delegate_cls("risk"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.DecisionAgent",
+                _delegate_cls("decision"),
+            ),
+            patch(
+                "src.agent.agents.recommendation_agent.PortfolioAgent",
+                _delegate_cls("portfolio"),
+            ),
+            patch.object(
+                RecommendationAgent,
+                "_calibrate_confidence",
+                side_effect=lambda raw_confidence, stock_code: raw_confidence,
+            ),
+        ):
+            agent = RecommendationAgent(
+                Mock(),
+                Mock(),
+                dimension="technical",
+            )
+            result = agent.run(
+                AgentContext(
+                    query="test",
+                    stock_code="AAPL",
+                    data={
+                        "quote": {"volume_ratio": 1.0},
+                        "technical": {},
+                        "risk_context": {"trading_days": 30},
+                    },
+                )
+            )
+
+        self.assertEqual(result.status, StageStatus.COMPLETED)
+        self.assertEqual(
+            ran_agents,
+            ["technical", "intel", "risk", "decision", "portfolio"],
+        )
+        self.assertIn("intel", ran_agents)
+
+    def test_risk_agent_preloaded_news_keys_skip_live_search_instruction(self) -> None:
+        agent = RiskAgent(Mock(), Mock())
+        live_search_instruction = (
+            "Search for latest news if you haven't received intel data yet."
+        )
+
+        message_with_news_items = agent.build_user_message(
+            AgentContext(stock_code="AAPL", data={"news_items": []})
+        )
+        message_with_news = agent.build_user_message(
+            AgentContext(stock_code="AAPL", data={"news": []})
+        )
+
+        self.assertNotIn(live_search_instruction, message_with_news_items)
+        self.assertNotIn(live_search_instruction, message_with_news)
+
+    def test_risk_agent_missing_preloaded_news_keeps_live_search_instruction(
+        self,
+    ) -> None:
+        agent = RiskAgent(Mock(), Mock())
+        live_search_instruction = (
+            "Search for latest news if you haven't received intel data yet."
+        )
+
+        message = agent.build_user_message(AgentContext(stock_code="AAPL", data={}))
+
+        self.assertIn(live_search_instruction, message)
 
     def test_backward_compatibility_api_schema(self) -> None:
         schema = RecommendationResponse.model_json_schema()

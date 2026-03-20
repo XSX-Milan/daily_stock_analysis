@@ -121,6 +121,45 @@ class SectorScannerServiceTestCase(unittest.TestCase):
 
         self.assertEqual(all_codes, ["000001", "000002", "000003", "000004"])
 
+    def test_get_sector_stocks_overseas_fallback_returns_without_provider_lookup(self):
+        service = SectorScannerService(data_fetcher=Mock(), top_n=10, max_universe=50)
+
+        with patch(
+            "src.services.sector_scanner_service.importlib.import_module",
+            side_effect=RuntimeError("provider import should be skipped"),
+        ):
+            codes = service.get_sector_stocks("Tech", limit=3, market="US")
+
+        self.assertEqual(codes, ["AAPL", "MSFT", "NVDA"])
+
+    def test_get_sector_stocks_overseas_non_fallback_still_uses_provider_metadata(self):
+        service = SectorScannerService(data_fetcher=Mock(), top_n=10, max_universe=50)
+        mock_yf = Mock()
+
+        def _ticker(symbol: str) -> Mock:
+            ticker = Mock()
+            if symbol == "AAPL":
+                ticker.info = {"sector": "AI Infra", "industry": "Semiconductors"}
+            else:
+                ticker.info = {"sector": "Utilities", "industry": "Power"}
+            return ticker
+
+        mock_yf.Ticker.side_effect = _ticker
+
+        with (
+            patch.object(
+                service, "_build_market_candidates", return_value=["AAPL", "MSFT"]
+            ),
+            patch(
+                "src.services.sector_scanner_service.importlib.import_module",
+                return_value=mock_yf,
+            ),
+        ):
+            codes = service.get_sector_stocks("AI Infra", limit=2, market="US")
+
+        self.assertEqual(codes, ["AAPL"])
+        mock_yf.Ticker.assert_any_call("AAPL")
+
 
 if __name__ == "__main__":
     unittest.main()

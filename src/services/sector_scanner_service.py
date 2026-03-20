@@ -194,6 +194,10 @@ class SectorScannerService:
         if not normalized_target:
             return []
 
+        fallback_codes = self._get_overseas_fallback_codes(normalized_target, market)
+        if fallback_codes:
+            return fallback_codes[:target_limit]
+
         market_candidates = self._build_market_candidates(market)
         if not market_candidates:
             return []
@@ -230,10 +234,6 @@ class SectorScannerService:
 
         if matched_codes:
             return list(dict.fromkeys(matched_codes))[:target_limit]
-
-        fallback_codes = self._get_overseas_fallback_codes(normalized_target, market)
-        if fallback_codes:
-            return fallback_codes[:target_limit]
 
         if provider_error is not None:
             logger.warning(

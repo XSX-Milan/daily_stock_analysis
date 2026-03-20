@@ -97,6 +97,54 @@ class RecommendationRepository:
             records = session.execute(query).scalars().all()
             return [self._to_domain(record) for record in records]
 
+    def get_history_list(
+        self,
+        market: str | MarketRegion | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return recommendation history rows for API list responses."""
+        filters = self._build_filters(priority=None, sector=None, region=market)
+
+        with self.db.session_scope() as session:
+            records = (
+                session.execute(
+                    select(RecommendationRecord)
+                    .where(*filters)
+                    .order_by(
+                        desc(RecommendationRecord.recommendation_date),
+                        desc(RecommendationRecord.updated_at),
+                        desc(RecommendationRecord.total_score),
+                        desc(RecommendationRecord.id),
+                    )
+                    .offset(max(offset, 0))
+                    .limit(max(limit, 0))
+                )
+                .scalars()
+                .all()
+            )
+            items: list[dict[str, Any]] = []
+            for record in records:
+                recommendation_date = cast(date | None, record.recommendation_date)
+                region = str(cast(str, record.region))
+                items.append(
+                    {
+                        "code": cast(str, record.code),
+                        "name": cast(str, record.name),
+                        "sector": cast(str | None, record.sector),
+                        "composite_score": float(cast(float, record.total_score)),
+                        "priority": cast(str, record.priority),
+                        "recommendation_date": recommendation_date.isoformat()
+                        if recommendation_date
+                        else None,
+                        "ai_summary": cast(str | None, record.ai_summary),
+                        "region": region,
+                        "market": region,
+                    }
+                )
+
+            return items
+
     def get_count(
         self,
         priority: str | RecommendationPriority | None = None,
@@ -122,6 +170,22 @@ class RecommendationRepository:
             result = session.execute(
                 delete(RecommendationRecord).where(
                     RecommendationRecord.recommendation_date < cutoff_date
+                )
+            )
+            deleted_count = getattr(result, "rowcount", 0) or 0
+
+        return int(deleted_count)
+
+    def delete_by_stock(self, code: str) -> int:
+        """Delete all recommendation history rows for one stock code."""
+        normalized_code = str(code).strip()
+        if not normalized_code:
+            return 0
+
+        with self.db.session_scope() as session:
+            result = session.execute(
+                delete(RecommendationRecord).where(
+                    RecommendationRecord.code == normalized_code
                 )
             )
             deleted_count = getattr(result, "rowcount", 0) or 0

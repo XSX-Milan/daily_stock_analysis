@@ -231,6 +231,112 @@ class TestRecommendationRepository(unittest.TestCase):
         self.assertEqual(self.repo.get_count(), 1)
         self.assertIsNotNone(self.repo.get_latest("00700"))
 
+    def test_get_history_list_returns_sorted_rows_with_market_filter(self) -> None:
+        base_time = datetime(2026, 3, 13, 9, 0, 0)
+        self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=88.0,
+                    updated_at=base_time,
+                ),
+                build_recommendation(
+                    "AAPL",
+                    name="Apple",
+                    region=MarketRegion.US,
+                    sector="Technology",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=91.0,
+                    updated_at=base_time + timedelta(minutes=30),
+                ),
+                build_recommendation(
+                    "TSLA",
+                    name="Tesla",
+                    region=MarketRegion.US,
+                    sector="Automotive",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=77.0,
+                    updated_at=base_time - timedelta(days=1),
+                ),
+            ]
+        )
+
+        items = self.repo.get_history_list(limit=10, offset=0)
+        self.assertEqual([item["code"] for item in items], ["AAPL", "600519", "TSLA"])
+
+        first = items[0]
+        self.assertEqual(
+            set(first.keys()),
+            {
+                "code",
+                "name",
+                "sector",
+                "composite_score",
+                "priority",
+                "recommendation_date",
+                "ai_summary",
+                "region",
+                "market",
+            },
+        )
+        self.assertEqual(first["region"], "US")
+        self.assertEqual(first["market"], "US")
+        self.assertEqual(first["recommendation_date"], "2026-03-13")
+        self.assertEqual(first["ai_summary"], "concise")
+
+        us_items = self.repo.get_history_list(market="US", limit=10, offset=0)
+        self.assertEqual([item["code"] for item in us_items], ["AAPL", "TSLA"])
+
+        paged = self.repo.get_history_list(limit=1, offset=1)
+        self.assertEqual(len(paged), 1)
+        self.assertEqual(paged[0]["code"], "600519")
+
+    def test_delete_by_stock_removes_all_rows_for_code(self) -> None:
+        base_time = datetime(2026, 3, 13, 9, 0, 0)
+        self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=82.0,
+                    updated_at=base_time,
+                ),
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=70.0,
+                    updated_at=base_time - timedelta(days=1),
+                ),
+                build_recommendation(
+                    "AAPL",
+                    name="Apple",
+                    region=MarketRegion.US,
+                    sector="Technology",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=74.0,
+                    updated_at=base_time,
+                ),
+            ]
+        )
+
+        deleted = self.repo.delete_by_stock(" 600519 ")
+        self.assertEqual(deleted, 2)
+        self.assertIsNone(self.repo.get_latest("600519"))
+        self.assertEqual(self.repo.get_count(), 1)
+        self.assertIsNotNone(self.repo.get_latest("AAPL"))
+
+        self.assertEqual(self.repo.delete_by_stock(""), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

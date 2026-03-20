@@ -43,6 +43,8 @@ class CompositeScore:
     total_score: float
     priority: RecommendationPriority
     dimension_scores: list[DimensionScore] = field(default_factory=list)
+    timeout_degraded: bool = False
+    risk_fallback_degraded: bool = False
     ai_refined: bool = False
     ai_summary: str | None = None
 

@@ -3,8 +3,11 @@
 
 name: stock_recommendation
 display_name: 量化推荐策略
+aliases: [量化推荐, 推荐框架, 个股推荐]
 description: 基于量化回测的股票推荐决策框架，覆盖量价关系、进出场规则、风险控制
 category: framework
+default_priority: 15
+market_regimes: [trending_up, sideways, sector_hot, volatile]
 core_rules: [1, 2, 3, 4, 5, 6, 7]
 required_tools:
   - get_daily_history

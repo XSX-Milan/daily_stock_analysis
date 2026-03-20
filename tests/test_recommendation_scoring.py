@@ -30,18 +30,35 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
         llm_adapter = Mock()
         agents = {
             "technical": RecommendationAgent(
-                registry, llm_adapter, dimension="technical"
+                registry,
+                llm_adapter,
+                technical_skill_policy="TECH_POLICY",
+                dimension="technical",
             ),
             "fundamental": RecommendationAgent(
                 registry,
                 llm_adapter,
+                technical_skill_policy="TECH_POLICY",
                 dimension="fundamental",
             ),
             "sentiment": RecommendationAgent(
-                registry, llm_adapter, dimension="sentiment"
+                registry,
+                llm_adapter,
+                technical_skill_policy="TECH_POLICY",
+                dimension="sentiment",
             ),
-            "macro": RecommendationAgent(registry, llm_adapter, dimension="macro"),
-            "risk": RecommendationAgent(registry, llm_adapter, dimension="risk"),
+            "macro": RecommendationAgent(
+                registry,
+                llm_adapter,
+                technical_skill_policy="TECH_POLICY",
+                dimension="macro",
+            ),
+            "risk": RecommendationAgent(
+                registry,
+                llm_adapter,
+                technical_skill_policy="TECH_POLICY",
+                dimension="risk",
+            ),
         }
         return ScoringEngine(
             weights=ScoringWeights(
@@ -374,8 +391,14 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
                     del ctx
                     return f"{name} user prompt"
 
-                def run(self, ctx: AgentContext, progress_callback=None) -> StageResult:
+                def run(
+                    self,
+                    ctx: AgentContext,
+                    progress_callback=None,
+                    timeout_seconds=None,
+                ) -> StageResult:
                     del progress_callback
+                    del timeout_seconds
                     captured_messages.append(self._build_messages(ctx))
                     return StageResult(
                         stage_name=name,
@@ -460,9 +483,15 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
                     del ctx
                     return f"{name} user prompt"
 
-                def run(self, ctx: AgentContext, progress_callback=None) -> StageResult:
+                def run(
+                    self,
+                    ctx: AgentContext,
+                    progress_callback=None,
+                    timeout_seconds=None,
+                ) -> StageResult:
                     del ctx
                     del progress_callback
+                    del timeout_seconds
                     ran_agents.append(name)
                     return StageResult(
                         stage_name=name,
@@ -541,9 +570,15 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
                     del ctx
                     return f"{name} user prompt"
 
-                def run(self, ctx: AgentContext, progress_callback=None) -> StageResult:
+                def run(
+                    self,
+                    ctx: AgentContext,
+                    progress_callback=None,
+                    timeout_seconds=None,
+                ) -> StageResult:
                     del ctx
                     del progress_callback
+                    del timeout_seconds
                     ran_agents.append(name)
                     return StageResult(
                         stage_name=name,

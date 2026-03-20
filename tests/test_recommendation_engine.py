@@ -2,6 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from data_provider.realtime_types import UnifiedRealtimeQuote
@@ -197,6 +198,143 @@ class RecommendationEngineTestCase(unittest.TestCase):
         ][0]
         self.assertEqual(risk_dim.score, 50.0)
         self.assertTrue(risk_dim.details["fallback"])
+        self.assertTrue(result.risk_fallback_degraded)
+
+    def test_score_stock_passes_timeout_budget_to_dimension_agents(self) -> None:
+        agents = {
+            "technical": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "fundamental": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "sentiment": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "macro": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "risk": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+        }
+        engine = ScoringEngine(
+            weights=ScoringWeights(
+                technical=20, fundamental=20, sentiment=20, macro=20, risk=20
+            ),
+            agents=agents,
+            config=SimpleNamespace(agent_orchestrator_timeout_s=12),
+        )
+
+        _ = engine.score_stock("600519", build_stock_data("600519"))
+
+        for agent in agents.values():
+            self.assertIn("timeout_seconds", agent.run.call_args.kwargs)
+            self.assertGreater(agent.run.call_args.kwargs["timeout_seconds"], 0)
+
+    def test_score_stock_skips_timeout_kwarg_for_legacy_dimension_agent(self) -> None:
+        captured_call_kwargs: list[dict[str, object]] = []
+
+        class LegacyAgent:
+            def run(self, ctx):
+                del ctx
+                captured_call_kwargs.append({})
+                return completed_stage("buy", 0.7, 80)
+
+        agents = {dimension: LegacyAgent() for dimension in self._DIMENSIONS}
+        engine = ScoringEngine(
+            weights=ScoringWeights(
+                technical=20, fundamental=20, sentiment=20, macro=20, risk=20
+            ),
+            agents=cast(Any, agents),
+            config=SimpleNamespace(agent_orchestrator_timeout_s=12),
+        )
+
+        result = engine.score_stock("600519", build_stock_data("600519"))
+
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(len(captured_call_kwargs), 5)
+
+    def test_score_stock_marks_timeout_degraded_fallbacks(self) -> None:
+        agents = {
+            "technical": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "fundamental": Mock(
+                run=Mock(
+                    return_value=StageResult(
+                        stage_name="fundamental",
+                        status=StageStatus.FAILED,
+                        error="Recommendation stage 'fundamental' timed out",
+                    )
+                )
+            ),
+            "sentiment": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "macro": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "risk": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+        }
+        engine = ScoringEngine(
+            weights=ScoringWeights(
+                technical=20, fundamental=20, sentiment=20, macro=20, risk=20
+            ),
+            agents=agents,
+        )
+
+        result = engine.score_stock("600519", build_stock_data("600519"))
+
+        self.assertTrue(result.timeout_degraded)
+        fundamental_dim = [
+            item for item in result.dimension_scores if item.dimension == "fundamental"
+        ][0]
+        self.assertTrue(fundamental_dim.details["timeout_degraded"])
+        self.assertEqual(
+            fundamental_dim.details["fallback_reason"],
+            "Recommendation stage 'fundamental' timed out",
+        )
+
+    def test_score_stock_distinguishes_skipped_stage_fallback(self) -> None:
+        agents = {
+            "technical": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "fundamental": Mock(
+                run=Mock(
+                    return_value=StageResult(
+                        stage_name="fundamental",
+                        status=StageStatus.SKIPPED,
+                    )
+                )
+            ),
+            "sentiment": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "macro": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "risk": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+        }
+        engine = ScoringEngine(
+            weights=ScoringWeights(
+                technical=20, fundamental=20, sentiment=20, macro=20, risk=20
+            ),
+            agents=agents,
+        )
+
+        result = engine.score_stock("600519", build_stock_data("600519"))
+
+        fundamental_dim = [
+            item for item in result.dimension_scores if item.dimension == "fundamental"
+        ][0]
+        self.assertTrue(fundamental_dim.details["fallback"])
+        self.assertEqual(
+            fundamental_dim.details["fallback_reason"],
+            "agent-stage-skipped",
+        )
+        self.assertFalse(result.timeout_degraded)
+
+    def test_score_stock_does_not_mark_non_risk_fallback_as_risk_degraded(self) -> None:
+        failed_stage = StageResult(
+            stage_name="macro", status=StageStatus.FAILED, error="mock fail"
+        )
+        agents = {
+            "technical": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "fundamental": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "sentiment": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+            "macro": Mock(run=Mock(return_value=failed_stage)),
+            "risk": Mock(run=Mock(return_value=completed_stage("buy", 0.7, 80))),
+        }
+        engine = ScoringEngine(
+            weights=ScoringWeights(
+                technical=20, fundamental=20, sentiment=20, macro=20, risk=20
+            ),
+            agents=agents,
+        )
+
+        result = engine.score_stock("600519", build_stock_data("600519"))
+
+        self.assertFalse(result.risk_fallback_degraded)
 
     def test_score_stock_raises_when_required_agent_missing(self) -> None:
         engine = ScoringEngine(
@@ -309,8 +447,9 @@ class RecommendationEngineTestCase(unittest.TestCase):
         delegate_build_count = 0
 
         def build_agent(score_0_100: float) -> Mock:
-            def run(ctx) -> StageResult:
+            def run(ctx, timeout_seconds=None) -> StageResult:
                 nonlocal delegate_build_count
+                del timeout_seconds
                 cached = ctx.get_data("_recommendation_delegate_results")
                 if not (isinstance(cached, list) and cached):
                     delegate_build_count += 1
@@ -353,7 +492,8 @@ class RecommendationEngineTestCase(unittest.TestCase):
         delegate_build_dimensions: list[str] = []
 
         def build_agent(dimension: str) -> Mock:
-            def run(ctx) -> StageResult:
+            def run(ctx, timeout_seconds=None) -> StageResult:
+                del timeout_seconds
                 cached = ctx.get_data("_recommendation_delegate_results")
                 if not (isinstance(cached, list) and cached):
                     delegate_build_dimensions.append(dimension)

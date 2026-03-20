@@ -240,12 +240,16 @@ def build_recommendation_agent(
 
     from src.agent.agents.recommendation_agent import RecommendationAgent
     from src.agent.llm_adapter import LLMToolAdapter
-    from src.agent.skills.defaults import get_default_active_skill_ids
+    from src.agent.skills.defaults import (
+        get_default_active_skill_ids,
+        get_default_technical_skill_policy,
+    )
 
     registry = get_tool_registry()
     skill_manager = get_skill_manager(config)
 
     configured_skills = getattr(config, "agent_skills", None) or None
+    explicit_skill_selection = bool(skills) or configured_skills is not None
     default_skills = get_default_active_skill_ids(skill_manager.list_skills())
     if skills is not None:
         skills_to_activate = skills or default_skills
@@ -261,6 +265,9 @@ def build_recommendation_agent(
         "tool_registry": registry,
         "llm_adapter": llm_adapter,
         "skill_instructions": skill_manager.get_skill_instructions(),
+        "technical_skill_policy": get_default_technical_skill_policy(
+            explicit_skill_selection=explicit_skill_selection,
+        ),
     }
 
     if dimension is not None:

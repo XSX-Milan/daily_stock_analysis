@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import logging
+import inspect
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -109,7 +111,14 @@ class ScoringEngine:
 
     def score_stock(self, code: str, data: StockScoringData) -> CompositeScore:
         """Score one stock and return its composite recommendation result."""
-        dimension_scores = self._dimension_scores(code, data)
+        timeout_seconds = self._get_timeout_seconds()
+        started_at = time.monotonic() if timeout_seconds is not None else None
+        dimension_scores = self._dimension_scores(
+            code,
+            data,
+            timeout_seconds=timeout_seconds,
+            started_at=started_at,
+        )
         fractions = self._resolved_weight_fractions(dimension_scores)
 
         total_score = 0.0
@@ -123,6 +132,8 @@ class ScoringEngine:
             total_score=total_score,
             priority=self._priority_for_score(total_score),
             dimension_scores=dimension_scores,
+            timeout_degraded=self._is_timeout_degraded(dimension_scores),
+            risk_fallback_degraded=self._is_risk_fallback_degraded(dimension_scores),
         )
         setattr(composite_score, "code", str(code).strip())
 
@@ -233,8 +244,46 @@ class ScoringEngine:
             preview = f"{preview}; ... (+{remainder} more)"
         return f"Batch scoring failed for all {total_count} stocks. Errors: {preview}"
 
+    def _get_timeout_seconds(self) -> float | None:
+        raw_value = getattr(self._config, "agent_orchestrator_timeout_s", 0)
+        try:
+            timeout_seconds = float(raw_value or 0)
+        except (TypeError, ValueError):
+            timeout_seconds = 0.0
+        if timeout_seconds <= 0:
+            return None
+        return timeout_seconds
+
+    @staticmethod
+    def _is_timeout_degraded(dimension_scores: list[DimensionScore]) -> bool:
+        for item in dimension_scores:
+            details = item.details or {}
+            if details.get("timeout_degraded"):
+                return True
+        return False
+
+    @staticmethod
+    def _is_risk_fallback_degraded(dimension_scores: list[DimensionScore]) -> bool:
+        for item in dimension_scores:
+            if item.dimension != "risk":
+                continue
+            details = item.details or {}
+            if details.get("fallback"):
+                return True
+        return False
+
+    @staticmethod
+    def _is_timeout_reason(reason: str | None) -> bool:
+        normalized = str(reason or "").strip().lower()
+        return "timeout" in normalized or "timed out" in normalized
+
     def _dimension_scores(
-        self, code: str, data: StockScoringData
+        self,
+        code: str,
+        data: StockScoringData,
+        *,
+        timeout_seconds: float | None = None,
+        started_at: float | None = None,
     ) -> list[DimensionScore]:
         missing = [
             name for name in self._REQUIRED_DIMENSIONS if name not in self._agents
@@ -247,16 +296,69 @@ class ScoringEngine:
         dimension_scores: list[DimensionScore] = []
         shared_delegate_results: list[dict[str, Any]] | None = None
         for dimension in self._REQUIRED_DIMENSIONS:
+            remaining_timeout = self._remaining_timeout_seconds(
+                timeout_seconds,
+                started_at,
+            )
+            if remaining_timeout is not None and remaining_timeout <= 0:
+                dimension_scores.append(
+                    self._fallback_dimension_score(
+                        dimension=dimension,
+                        reason="agent-timeout-before-run",
+                    )
+                )
+                continue
             dimension_score, delegate_results = self._score_dimension(
                 code=code,
                 data=data,
                 dimension=dimension,
                 delegated_results=shared_delegate_results,
+                timeout_seconds=remaining_timeout,
             )
             dimension_scores.append(dimension_score)
             if delegate_results:
                 shared_delegate_results = delegate_results
         return dimension_scores
+
+    @staticmethod
+    def _remaining_timeout_seconds(
+        timeout_seconds: float | None,
+        started_at: float | None,
+    ) -> float | None:
+        if timeout_seconds is None:
+            return None
+        if started_at is None:
+            return max(0.0, float(timeout_seconds))
+        elapsed = time.monotonic() - started_at
+        return max(0.0, float(timeout_seconds) - elapsed)
+
+    @staticmethod
+    def _callable_accepts_timeout_kwarg(func: Any) -> bool | None:
+        if not callable(func):
+            return None
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return None
+
+        if "timeout_seconds" in signature.parameters:
+            return True
+        return any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+
+    def _agent_run_accepts_timeout(self, run_callable: Any) -> bool:
+        side_effect = getattr(run_callable, "side_effect", None)
+        accepts_timeout = self._callable_accepts_timeout_kwarg(side_effect)
+        if accepts_timeout is not None:
+            return accepts_timeout
+
+        accepts_timeout = self._callable_accepts_timeout_kwarg(run_callable)
+        if accepts_timeout is not None:
+            return accepts_timeout
+
+        return True
 
     def _build_agents(
         self,
@@ -299,6 +401,7 @@ class ScoringEngine:
         data: StockScoringData,
         dimension: str,
         delegated_results: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[DimensionScore, list[dict[str, Any]]]:
         ctx = self._build_agent_context(code=code, data=data, dimension=dimension)
         if delegated_results:
@@ -306,7 +409,14 @@ class ScoringEngine:
         agent = self._agents[dimension]
 
         try:
-            stage_result = agent.run(ctx)
+            run_kwargs: dict[str, Any] = {}
+            if (
+                timeout_seconds is not None
+                and timeout_seconds > 0
+                and self._agent_run_accepts_timeout(agent.run)
+            ):
+                run_kwargs["timeout_seconds"] = timeout_seconds
+            stage_result = agent.run(ctx, **run_kwargs)
         except Exception as exc:
             return (
                 self._fallback_dimension_score(
@@ -317,6 +427,16 @@ class ScoringEngine:
             )
 
         delegate_results = self._extract_recommendation_delegate_results(ctx)
+
+        if stage_result.status == StageStatus.SKIPPED:
+            return (
+                self._fallback_dimension_score(
+                    dimension=dimension,
+                    reason="agent-stage-skipped",
+                    stage_result=stage_result,
+                ),
+                delegate_results,
+            )
 
         if stage_result.status != StageStatus.COMPLETED:
             return (
@@ -485,9 +605,11 @@ class ScoringEngine:
         reason: str,
         stage_result: StageResult | None = None,
     ) -> DimensionScore:
+        timeout_degraded = self._is_timeout_reason(reason)
         details: dict[str, Any] = {
             "fallback": True,
             "fallback_reason": reason,
+            "timeout_degraded": timeout_degraded,
             "signal": Signal.HOLD.value,
             "confidence": 0.5,
             "confidence_percent": 50.0,

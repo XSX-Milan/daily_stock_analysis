@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 import math
+import inspect
+import time
 from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
@@ -138,10 +140,20 @@ class RecommendationAgent(BaseAgent):
         timeout_seconds: Optional[float] = None,
     ) -> StageResult:
         del progress_callback
-        del timeout_seconds
         result = StageResult(stage_name=self.agent_name, status=StageStatus.RUNNING)
+        started_at = time.monotonic()
         try:
-            delegated = self._collect_delegated_opinions(ctx)
+            self._raise_if_timed_out(
+                timeout_seconds, started_at, stage_name=self.agent_name
+            )
+            delegated = self._collect_delegated_opinions(
+                ctx,
+                timeout_seconds=timeout_seconds,
+                started_at=started_at,
+            )
+            self._raise_if_timed_out(
+                timeout_seconds, started_at, stage_name=self.agent_name
+            )
             trend_score = self._analyze_trend_score(ctx)
             dimension_score = self._dimension_score(ctx, trend_score, delegated)
             raw_confidence = self._confidence_score(ctx, delegated)
@@ -171,6 +183,8 @@ class RecommendationAgent(BaseAgent):
             result.meta["dimension"] = self.dimension
             result.meta["trend_score"] = trend_score
             result.meta["delegate_count"] = len(delegated)
+            if timeout_seconds is not None:
+                result.meta["timeout_seconds"] = timeout_seconds
             return result
         except Exception as exc:
             result.status = StageStatus.FAILED
@@ -418,12 +432,49 @@ class RecommendationAgent(BaseAgent):
         score = score * 0.65 + self._delegated_score(delegated) * 0.35
         return self._clamp_0_100(score)
 
-    def _collect_delegated_opinions(self, ctx: AgentContext) -> list[dict[str, Any]]:
+    def _callable_accepts_timeout_kwarg(self, func: Any) -> Optional[bool]:
+        if not callable(func):
+            return None
+        try:
+            signature = inspect.signature(func)
+        except (TypeError, ValueError):
+            return None
+
+        if "timeout_seconds" in signature.parameters:
+            return True
+        return any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+
+    def _agent_run_accepts_timeout(self, run_callable: Any) -> bool:
+        side_effect = getattr(run_callable, "side_effect", None)
+        accepts_timeout = self._callable_accepts_timeout_kwarg(side_effect)
+        if accepts_timeout is not None:
+            return accepts_timeout
+
+        accepts_timeout = self._callable_accepts_timeout_kwarg(run_callable)
+        if accepts_timeout is not None:
+            return accepts_timeout
+
+        return True
+
+    def _collect_delegated_opinions(
+        self,
+        ctx: AgentContext,
+        *,
+        timeout_seconds: Optional[float] = None,
+        started_at: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
         delegated = self._collect_cached_delegates(ctx)
         if delegated:
             return delegated
 
-        delegated = self._run_main_agent_delegation(ctx)
+        delegated = self._run_main_agent_delegation(
+            ctx,
+            timeout_seconds=timeout_seconds,
+            started_at=started_at,
+        )
         if delegated:
             ctx.set_data("_recommendation_delegate_results", delegated)
             return delegated
@@ -433,7 +484,13 @@ class RecommendationAgent(BaseAgent):
             ctx.set_data("_recommendation_delegate_results", delegated)
         return delegated
 
-    def _run_main_agent_delegation(self, ctx: AgentContext) -> list[dict[str, Any]]:
+    def _run_main_agent_delegation(
+        self,
+        ctx: AgentContext,
+        *,
+        timeout_seconds: Optional[float] = None,
+        started_at: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
         delegate_ctx = AgentContext(
             query=ctx.query,
             stock_code=ctx.stock_code,
@@ -472,6 +529,15 @@ class RecommendationAgent(BaseAgent):
 
         delegated: list[dict[str, Any]] = []
         for agent in main_agents:
+            remaining_timeout = self._remaining_timeout_seconds(
+                timeout_seconds,
+                started_at,
+            )
+            self._raise_if_timed_out(
+                remaining_timeout,
+                None,
+                stage_name=agent.agent_name,
+            )
             if agent.agent_name == "portfolio" and delegated:
                 delegate_ctx.set_data(
                     "stock_opinions",
@@ -481,12 +547,46 @@ class RecommendationAgent(BaseAgent):
                     "stock_list", [ctx.stock_code] if ctx.stock_code else []
                 )
 
-            stage = agent.run(delegate_ctx)
+            run_kwargs: dict[str, Any] = {}
+            if (
+                remaining_timeout is not None
+                and remaining_timeout > 0
+                and self._agent_run_accepts_timeout(agent.run)
+            ):
+                run_kwargs["timeout_seconds"] = remaining_timeout
+
+            stage = agent.run(delegate_ctx, **run_kwargs)
             if stage.status != StageStatus.COMPLETED or stage.opinion is None:
                 continue
             delegated.append(self._normalize_delegate_opinion(stage.opinion))
 
         return delegated
+
+    @staticmethod
+    def _remaining_timeout_seconds(
+        timeout_seconds: Optional[float],
+        started_at: Optional[float],
+    ) -> Optional[float]:
+        if timeout_seconds is None:
+            return None
+        if started_at is None:
+            return max(0.0, float(timeout_seconds))
+        elapsed = time.monotonic() - started_at
+        return max(0.0, float(timeout_seconds) - elapsed)
+
+    @staticmethod
+    def _raise_if_timed_out(
+        timeout_seconds: Optional[float],
+        started_at: Optional[float],
+        *,
+        stage_name: str,
+    ) -> None:
+        remaining_timeout = RecommendationAgent._remaining_timeout_seconds(
+            timeout_seconds,
+            started_at,
+        )
+        if remaining_timeout is not None and remaining_timeout <= 0:
+            raise TimeoutError(f"Recommendation stage '{stage_name}' timed out")
 
     @staticmethod
     def _has_preloaded_news_context(ctx: AgentContext) -> bool:

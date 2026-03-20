@@ -17,12 +17,14 @@
 #   dry-run     - 仅获取数据不分析
 #   full        - 完整流程测试
 #   quick       - 快速测试（单只股票）
+#   recommendation - 推荐池测试（A股/国产芯片）
 #   all         - 运行所有测试
 #
 # 示例：
 #   ./test.sh market      # 测试大盘复盘
 #   ./test.sh us-stock    # 测试美股分析
 #   ./test.sh quick       # 快速测试
+#   ./test.sh recommendation  # 测试推荐池
 #
 
 set -e
@@ -159,7 +161,50 @@ test_quick() {
     success "快速测试完成"
 }
 
-# 测试10: 代码识别测试
+# 测试10: recommendation推荐池测试
+test_recommendation() {
+    header "测试场景: Recommendation 推荐池"
+    info "测试 recommendation: A股 / 国产芯片 / 候选3 / 最终推荐1 / AI阈值55"
+
+    RECOMMEND_MAX_UNIVERSE=3 \
+    RECOMMEND_TOP_N_PER_SECTOR=1 \
+    RECOMMEND_SCORE_THRESHOLD_AI=55 \
+    python3 << 'PYTEST'
+import sys
+
+sys.path.insert(0, '.')
+
+from src.services.recommendation_service import RecommendationService
+
+
+service = RecommendationService()
+
+assert service.sector_scanner_service.max_universe == 3, service.sector_scanner_service.max_universe
+assert service.recommend_top_n_per_sector == 1, service.recommend_top_n_per_sector
+assert service.recommend_score_threshold_ai == 55, service.recommend_score_threshold_ai
+
+items = service.refresh_all(market="CN", sector="国产芯片", force=True)
+
+if len(items) > 1:
+    raise AssertionError(f"expected at most 1 recommendation, got {len(items)}")
+
+print("\nRecommendation 测试结果:")
+print("-" * 60)
+print(f"返回数量: {len(items)}")
+for item in items:
+    composite_score = getattr(item, "composite_score", None)
+    total_score = getattr(composite_score, "total_score", None)
+    priority = getattr(composite_score, "priority", None)
+    print(
+        f"- {item.code} {item.name} | 板块: {item.sector} | 分数: {total_score} | 优先级: {priority}"
+    )
+print("-" * 60)
+PYTEST
+
+    success "Recommendation 推荐池测试完成"
+}
+
+# 测试11: 代码识别测试
 test_code_recognition() {
     header "测试场景: 代码识别"
     info "测试股票代码识别逻辑..."
@@ -200,7 +245,7 @@ PYTEST
     success "代码识别测试完成"
 }
 
-# 测试11: YFinance代码转换测试
+# 测试12: YFinance代码转换测试
 test_yfinance_convert() {
     header "测试场景: YFinance 代码转换"
     info "测试YFinance代码转换逻辑..."
@@ -240,7 +285,7 @@ PYTEST
     success "YFinance 代码转换测试完成"
 }
 
-# 测试12: 语法检查
+# 测试13: 语法检查
 test_syntax() {
     header "测试场景: Python 语法检查"
     info "检查所有Python文件语法..."
@@ -253,7 +298,7 @@ test_syntax() {
     success "语法检查通过"
 }
 
-# 测试13: Flake8 静态检查
+# 测试14: Flake8 静态检查
 test_flake8() {
     header "测试场景: Flake8 静态检查"
     info "运行 Flake8 检查严重错误..."
@@ -334,6 +379,10 @@ main() {
             shift
             test_quick "$@"
             ;;
+        recommendation|recommend|reco)
+            shift
+            test_recommendation "$@"
+            ;;
         code|recognition)
             shift
             test_code_recognition "$@"
@@ -368,6 +417,7 @@ main() {
             echo "  dry-run     - 仅获取数据"
             echo "  full        - 完整流程"
             echo "  quick       - 快速测试（推荐）"
+            echo "  recommendation - 推荐测试（A股/国产芯片）"
             echo "  code        - 代码识别测试"
             echo "  yfinance    - YFinance转换测试"
             echo "  syntax      - 语法检查"
@@ -376,6 +426,7 @@ main() {
             echo ""
             echo "示例:"
             echo "  $0 quick     # 快速测试"
+            echo "  $0 recommendation  # 测试推荐"
             echo "  $0 us-stock  # 测试美股"
             echo "  $0 code      # 测试代码识别"
             echo "  $0 all       # 运行所有测试"

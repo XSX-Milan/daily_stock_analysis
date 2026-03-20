@@ -581,10 +581,9 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertEqual([item["stock_count"] for item in sectors], [3, 2])
         self.assertTrue(all(item["change_pct"] is None for item in sectors))
 
-    def test_weights_get_put_and_sum_validation(self) -> None:
+    def test_weights_endpoints_are_not_exposed(self) -> None:
         get_response = self.client.get("/api/v1/recommendation/weights")
-        self.assertEqual(get_response.status_code, 200)
-        self.assertEqual(get_response.json()["technical"], 30)
+        self.assertEqual(get_response.status_code, 404)
 
         put_response = self.client.put(
             "/api/v1/recommendation/weights",
@@ -596,28 +595,10 @@ class RecommendationApiTestCase(unittest.TestCase):
                 "risk": 10,
             },
         )
-        self.assertEqual(put_response.status_code, 200)
-        self.assertEqual(put_response.json()["technical"], 35)
-
-        get_after_put_response = self.client.get("/api/v1/recommendation/weights")
-        self.assertEqual(get_after_put_response.status_code, 200)
-        self.assertEqual(get_after_put_response.json()["technical"], 35)
-
-        invalid_response = self.client.put(
-            "/api/v1/recommendation/weights",
-            json={
-                "technical": 50,
-                "fundamental": 50,
-                "sentiment": 50,
-                "macro": 50,
-                "risk": 50,
-            },
-        )
-        self.assertEqual(invalid_response.status_code, 422)
+        self.assertEqual(put_response.status_code, 404)
 
         openapi = self.client.get("/openapi.json").json()
-        put_operation = openapi["paths"]["/api/v1/recommendation/weights"]["put"]
-        self.assertTrue(put_operation["deprecated"])
+        self.assertNotIn("/api/v1/recommendation/weights", openapi["paths"])
 
     def test_watchlist_get_post_delete_endpoints(self) -> None:
         post_response = self.client.post(

@@ -70,14 +70,6 @@ export interface WatchlistItem {
   addedAt: string;
 }
 
-export interface ScoringWeights {
-  technical: number;
-  fundamental: number;
-  sentiment: number;
-  macro: number;
-  risk: number;
-}
-
 export interface RecommendationFilters {
   priority?: RecommendationPriority | string;
   sector?: string;

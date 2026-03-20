@@ -110,7 +110,7 @@ class ScoringEngine:
     def score_stock(self, code: str, data: StockScoringData) -> CompositeScore:
         """Score one stock and return its composite recommendation result."""
         dimension_scores = self._dimension_scores(code, data)
-        fractions = self._weights.to_fractions()
+        fractions = self._resolved_weight_fractions(dimension_scores)
 
         total_score = 0.0
         for dimension_score in dimension_scores:
@@ -130,6 +130,47 @@ class ScoringEngine:
             self._apply_ai_refinement(code, composite_score)
 
         return composite_score
+
+    def _resolved_weight_fractions(
+        self,
+        dimension_scores: list[DimensionScore],
+    ) -> dict[str, float]:
+        base_fractions = self._weights.to_fractions()
+        if not self._should_auto_adjust_weights():
+            return base_fractions
+
+        weighted: dict[str, float] = {}
+        for dimension_score in dimension_scores:
+            base_weight = base_fractions.get(dimension_score.dimension, 0.0)
+            confidence = self._dimension_confidence_multiplier(dimension_score)
+            weighted[dimension_score.dimension] = base_weight * confidence
+
+        total = sum(weighted.values())
+        if total <= 0:
+            return base_fractions
+
+        normalized = {dimension: value / total for dimension, value in weighted.items()}
+        for dimension_score in dimension_scores:
+            dimension_score.details["base_weight"] = round(
+                base_fractions.get(dimension_score.dimension, 0.0), 6
+            )
+            dimension_score.details["effective_weight"] = round(
+                normalized.get(dimension_score.dimension, 0.0), 6
+            )
+            dimension_score.details["weight_auto_adjusted"] = True
+        return normalized
+
+    def _should_auto_adjust_weights(self) -> bool:
+        return bool(getattr(self._config, "agent_memory_enabled", False))
+
+    @staticmethod
+    def _dimension_confidence_multiplier(dimension_score: DimensionScore) -> float:
+        details = dimension_score.details or {}
+        try:
+            confidence = float(details.get("confidence", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            confidence = 0.5
+        return max(0.1, min(1.0, confidence))
 
     def score_batch(
         self, stocks: list[tuple[str, StockScoringData]]

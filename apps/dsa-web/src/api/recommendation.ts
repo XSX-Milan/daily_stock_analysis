@@ -8,7 +8,6 @@ import type {
   RecommendationRefreshRequest,
   RecommendationRefreshResponse,
   PrioritySummary,
-  ScoringWeights,
   WatchlistItem,
 } from '../types/recommendation';
 
@@ -223,16 +222,6 @@ export const deleteHistory = async (code: string): Promise<void> => {
   await apiClient.delete(`/api/v1/recommendation/history/${encodeURIComponent(code)}`);
 };
 
-export const getScoringWeights = async (): Promise<ScoringWeights> => {
-  const response = await apiClient.get<Record<string, unknown>>('/api/v1/recommendation/weights');
-  return toCamelCase<ScoringWeights>(response.data);
-};
-
-export const updateScoringWeights = async (weights: ScoringWeights): Promise<ScoringWeights> => {
-  const response = await apiClient.put<Record<string, unknown>>('/api/v1/recommendation/weights', weights);
-  return toCamelCase<ScoringWeights>(response.data);
-};
-
 export const getWatchlist = async (): Promise<WatchlistItem[]> => {
   const response = await apiClient.get<Record<string, unknown>>('/api/v1/recommendation/watchlist');
   return toCamelCase<WatchlistItem[]>(response.data);
@@ -255,8 +244,6 @@ export const removeFromWatchlist = async (code: string): Promise<void> => {
   await apiClient.delete(`/api/v1/recommendation/watchlist/${encodeURIComponent(code)}`);
 };
 
-export const getWeights = getScoringWeights;
-export const updateWeights = updateScoringWeights;
 export const triggerRefresh = refreshRecommendations;
 
 export const recommendationApi = {
@@ -266,12 +253,8 @@ export const recommendationApi = {
   getHistory,
   deleteHistory,
   getSummary,
-  getScoringWeights,
-  updateScoringWeights,
   getWatchlist,
   addToWatchlist,
   removeFromWatchlist,
-  getWeights,
-  updateWeights,
   triggerRefresh,
 };

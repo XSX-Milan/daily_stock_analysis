@@ -1,13 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { Sparkles } from 'lucide-react';
-import type { RecommendationItem, ScoringWeights } from '../../types/recommendation';
+import type { RecommendationItem } from '../../types/recommendation';
 import { RecommendationPriority, MarketRegion } from '../../types/recommendation';
 import { ScoreBar } from './ScoreBar';
 import { Badge } from '../common/Badge';
 
 interface RecommendationTableProps {
   recommendations: RecommendationItem[];
-  weights?: ScoringWeights;
   onRowClick: (stockCode: string) => void;
   loading: boolean;
 }
@@ -49,7 +48,6 @@ const formatPrice = (value?: number | null): string => {
 
 export const RecommendationTable: React.FC<RecommendationTableProps> = ({ 
   recommendations, 
-  weights,
   onRowClick,
   loading
 }) => {
@@ -190,7 +188,7 @@ export const RecommendationTable: React.FC<RecommendationTableProps> = ({
                     <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{formatPrice(price)}</td>
                     <td className="px-3 py-2 font-mono text-white whitespace-nowrap">{item.compositeScore.toFixed(1)}</td>
                     <td className="px-3 py-2 w-48">
-                      <ScoreBar scores={item.scores} compositeScore={item.compositeScore} weights={weights} />
+                      <ScoreBar scores={item.scores} compositeScore={item.compositeScore} />
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.suggestedBuy)}</td>
                     <td className="px-3 py-2 text-right font-mono text-secondary whitespace-nowrap">{formatPrice(item.takeProfit)}</td>

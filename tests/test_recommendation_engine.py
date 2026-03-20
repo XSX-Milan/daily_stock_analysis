@@ -140,6 +140,37 @@ class RecommendationEngineTestCase(unittest.TestCase):
         self.assertEqual(result.priority, RecommendationPriority.POSITION)
         self.assertEqual(len(result.dimension_scores), 5)
 
+    def test_score_stock_auto_adjusts_effective_weights_from_confidence_when_memory_enabled(
+        self,
+    ) -> None:
+        agents = {
+            "technical": Mock(run=Mock(return_value=completed_stage("buy", 0.9, 80))),
+            "fundamental": Mock(run=Mock(return_value=completed_stage("buy", 0.3, 80))),
+            "sentiment": Mock(run=Mock(return_value=completed_stage("buy", 0.2, 80))),
+            "macro": Mock(run=Mock(return_value=completed_stage("buy", 0.1, 80))),
+            "risk": Mock(run=Mock(return_value=completed_stage("buy", 0.1, 80))),
+        }
+        engine = ScoringEngine(
+            weights=ScoringWeights(
+                technical=30, fundamental=25, sentiment=20, macro=15, risk=10
+            ),
+            agents=agents,
+            config=SimpleNamespace(agent_memory_enabled=True),
+        )
+
+        result = engine.score_stock("600519", build_stock_data("600519"))
+
+        weights = {item.dimension: item.weight for item in result.dimension_scores}
+        self.assertGreater(weights["technical"], 0.3)
+        self.assertLess(weights["macro"], 0.15)
+        self.assertAlmostEqual(sum(weights.values()), 1.0, places=6)
+        self.assertTrue(
+            all(
+                item.details.get("weight_auto_adjusted")
+                for item in result.dimension_scores
+            )
+        )
+
     def test_score_stock_uses_fallback_when_agent_stage_fails(self) -> None:
         failed_stage = StageResult(
             stage_name="risk", status=StageStatus.FAILED, error="mock fail"

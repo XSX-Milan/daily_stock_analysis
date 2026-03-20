@@ -79,22 +79,6 @@ class HotSectorListResponse(BaseModel):
     sectors: list[HotSectorItemResponse] = Field(default_factory=list)
 
 
-class ScoringWeightsRequest(BaseModel):
-    """Request schema for setting recommendation scoring weights."""
-
-    technical: int = Field(..., ge=0, le=100)
-    fundamental: int = Field(..., ge=0, le=100)
-    sentiment: int = Field(..., ge=0, le=100)
-    macro: int = Field(..., ge=0, le=100)
-    risk: int = Field(..., ge=0, le=100)
-
-
-class ScoringWeightsResponse(ScoringWeightsRequest):
-    """Response schema for recommendation scoring weights."""
-
-    pass
-
-
 class RefreshRequest(BaseModel):
     """Request schema for recommendation refresh endpoints."""
 

@@ -17,14 +17,11 @@ from api.v1.schemas.recommendation import (
     RecommendationListResponse,
     RecommendationResponse,
     RefreshRequest,
-    ScoringWeightsRequest,
-    ScoringWeightsResponse,
     WatchlistAddRequest,
     WatchlistItemResponse,
 )
 from src.recommendation.models import (
     RecommendationPriority,
-    ScoringWeights,
     StockRecommendation,
 )
 from src.services.sector_scanner_service import _OVERSEAS_SECTOR_FALLBACK
@@ -496,88 +493,6 @@ def get_hot_sectors(
             )
 
     return HotSectorListResponse(sectors=sectors)
-
-
-@router.get(
-    "/weights",
-    response_model=ScoringWeightsResponse,
-    responses={
-        200: {"description": "Current scoring weights"},
-        500: {"description": "Internal server error", "model": ErrorResponse},
-    },
-    summary="Get scoring weights",
-)
-def get_scoring_weights(
-    service: RecommendationService = Depends(get_recommendation_service),
-) -> ScoringWeightsResponse:
-    """Return the active scoring weight configuration."""
-    try:
-        weights = service.get_scoring_weights()
-        return ScoringWeightsResponse(
-            technical=weights.technical,
-            fundamental=weights.fundamental,
-            sentiment=weights.sentiment,
-            macro=weights.macro,
-            risk=weights.risk,
-        )
-    except Exception as exc:
-        logger.error("Failed to query scoring weights: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "internal_error",
-                "message": f"Failed to query scoring weights: {str(exc)}",
-            },
-        )
-
-
-@router.put(
-    "/weights",
-    response_model=ScoringWeightsResponse,
-    responses={
-        200: {"description": "Scoring weights updated"},
-        422: {"description": "Validation error", "model": ErrorResponse},
-        500: {"description": "Internal server error", "model": ErrorResponse},
-    },
-    summary="Update scoring weights",
-    deprecated=True,
-)
-def update_scoring_weights(
-    request: ScoringWeightsRequest,
-    service: RecommendationService = Depends(get_recommendation_service),
-) -> ScoringWeightsResponse:
-    """Validate and update recommendation scoring weights."""
-    try:
-        updated = service.update_scoring_weights(
-            ScoringWeights(
-                technical=request.technical,
-                fundamental=request.fundamental,
-                sentiment=request.sentiment,
-                macro=request.macro,
-                risk=request.risk,
-            )
-        )
-        return ScoringWeightsResponse(
-            technical=updated.technical,
-            fundamental=updated.fundamental,
-            sentiment=updated.sentiment,
-            macro=updated.macro,
-            risk=updated.risk,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error": "validation_error", "message": str(exc)},
-        )
-    except Exception as exc:
-        logger.error("Failed to update scoring weights: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "internal_error",
-                "message": f"Failed to update scoring weights: {str(exc)}",
-            },
-        )
 
 
 @router.get(

@@ -1,19 +1,8 @@
 import type React from 'react';
-import type { ScoringWeights } from '../../types/recommendation';
-
 interface ScoreBarProps {
   scores: Record<string, number>;
   compositeScore: number;
-  weights?: ScoringWeights;
 }
-
-const DEFAULT_WEIGHTS: ScoringWeights = {
-  technical: 30,
-  fundamental: 25,
-  sentiment: 20,
-  macro: 15,
-  risk: 10,
-};
 
 const DIMENSIONS = [
   { key: 'technical', label: '技术' },
@@ -34,7 +23,6 @@ const getScoreColor = (score: number) => {
 export const ScoreBar: React.FC<ScoreBarProps> = ({
   scores,
   compositeScore,
-  weights = DEFAULT_WEIGHTS,
 }) => {
   const hasScores = scores && Object.keys(scores).length > 0;
 
@@ -89,8 +77,6 @@ export const ScoreBar: React.FC<ScoreBarProps> = ({
     );
   }
 
-  const totalWeight = Object.values(weights).reduce((sum, w) => sum + w, 0);
-
   return (
     <div className="flex flex-col w-full" data-testid="score-bar">
       <style>{`
@@ -124,43 +110,34 @@ export const ScoreBar: React.FC<ScoreBarProps> = ({
           visibility: visible;
         }
       `}</style>
-      <div className="flex h-2 w-full rounded overflow-visible bg-gray-800 gap-[1px]">
-        {DIMENSIONS.map(({ key, label }) => {
-          const rawScore = scores[key] ?? 0;
-          const score = clamp(rawScore);
-          const weight = weights[key as keyof ScoringWeights] ?? 0;
-          const widthPercent = totalWeight > 0 ? (weight / totalWeight) * 100 : 0;
+        <div className="flex h-2 w-full rounded overflow-visible bg-gray-800 gap-[1px]">
+          {DIMENSIONS.map(({ key, label }) => {
+            const rawScore = scores[key] ?? 0;
+            const score = clamp(rawScore);
 
-          if (widthPercent === 0) return null;
+            const color = getScoreColor(score);
 
-          const color = getScoreColor(score);
-
-          return (
-            <div
-              key={key}
-              data-testid={`score-segment-${key}`}
-              className="h-full transition-all duration-500 first:rounded-l last:rounded-r score-segment-tooltip"
-              style={{ width: `${widthPercent}%`, backgroundColor: color }}
-              data-tooltip={`${label}: ${score.toFixed(1)} (权重: ${weight}%)`}
-            />
-          );
-        })}
-      </div>
-      <div className="flex w-full mt-1 text-[10px] font-mono text-gray-500">
-        {DIMENSIONS.map(({ key, label }) => {
-          const weight = weights[key as keyof ScoringWeights] ?? 0;
-          const widthPercent = totalWeight > 0 ? (weight / totalWeight) * 100 : 0;
-          
-          if (widthPercent === 0) return null;
-          
-          return (
-            <div 
-              key={`label-${key}`} 
-              className="text-center truncate px-0.5" 
-              style={{ width: `${widthPercent}%` }}
-              title={label}
-            >
-              {label}
+            return (
+              <div
+                key={key}
+                data-testid={`score-segment-${key}`}
+                className="h-full transition-all duration-500 first:rounded-l last:rounded-r score-segment-tooltip"
+                style={{ width: `${100 / DIMENSIONS.length}%`, backgroundColor: color }}
+                data-tooltip={`${label}: ${score.toFixed(1)}`}
+              />
+            );
+          })}
+        </div>
+        <div className="flex w-full mt-1 text-[10px] font-mono text-gray-500">
+          {DIMENSIONS.map(({ key, label }) => {
+            return (
+              <div 
+                key={`label-${key}`} 
+                className="text-center truncate px-0.5" 
+                style={{ width: `${100 / DIMENSIONS.length}%` }}
+                title={label}
+              >
+                {label}
             </div>
           );
         })}

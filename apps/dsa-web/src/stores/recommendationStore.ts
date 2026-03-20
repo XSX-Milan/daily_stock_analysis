@@ -7,7 +7,6 @@ import type {
   RecommendationFilters,
   RecommendationItem,
   RecommendationRefreshRequest,
-  ScoringWeights,
 } from '../types/recommendation';
 
 interface RecommendationState {
@@ -19,7 +18,6 @@ interface RecommendationState {
   historyOffset: number;
   historyMarket?: string;
   summary: PrioritySummary | null;
-  weights: ScoringWeights;
   loading: boolean;
   error: string | null;
   filters: RecommendationFilters;
@@ -35,21 +33,12 @@ interface RecommendationActions {
   fetchHistory: (market?: string, limit?: number, offset?: number) => Promise<void>;
   deleteHistoryStock: (code: string, market?: string, limit?: number, offset?: number) => Promise<void>;
   fetchSummary: () => Promise<void>;
-  fetchWeights: () => Promise<void>;
-  updateWeights: (weights: ScoringWeights) => Promise<void>;
   triggerRefresh: (request: RecommendationStoreRefreshRequest) => Promise<void>;
   setFilter: (key: keyof RecommendationFilters, value?: string) => void;
   clearFilters: () => void;
 }
 
 const DEFAULT_FILTERS: RecommendationFilters = {};
-const DEFAULT_WEIGHTS: ScoringWeights = {
-  technical: 30,
-  fundamental: 25,
-  sentiment: 20,
-  macro: 15,
-  risk: 10,
-};
 
 export const useRecommendationStore = create<RecommendationState & RecommendationActions>((set, get) => ({
   recommendations: [],
@@ -60,7 +49,6 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
   historyOffset: 0,
   historyMarket: undefined,
   summary: null,
-  weights: DEFAULT_WEIGHTS,
   loading: false,
   error: null,
   filters: { ...DEFAULT_FILTERS },
@@ -154,37 +142,6 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
     try {
       const summary = await recommendationApi.getSummary();
       set({ summary, loading: false, error: null });
-    } catch (error: unknown) {
-      set({ loading: false, error: getParsedApiError(error).message });
-    }
-  },
-
-  fetchWeights: async () => {
-    set({ loading: true, error: null });
-    try {
-      const weights = await recommendationApi.getWeights();
-      set({ weights, loading: false, error: null });
-    } catch (error: unknown) {
-      set({ loading: false, error: getParsedApiError(error).message });
-    }
-  },
-
-  updateWeights: async (weights) => {
-    set({ loading: true, error: null });
-    try {
-      await recommendationApi.updateWeights(weights);
-      const [latestWeights, latestList, latestSummary] = await Promise.all([
-        recommendationApi.getWeights(),
-        recommendationApi.getRecommendations(get().filters),
-        recommendationApi.getSummary(),
-      ]);
-      set({
-        weights: latestWeights,
-        recommendations: latestList.items,
-        summary: latestSummary,
-        loading: false,
-        error: null,
-      });
     } catch (error: unknown) {
       set({ loading: false, error: getParsedApiError(error).message });
     }

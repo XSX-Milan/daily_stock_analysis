@@ -41,7 +41,6 @@ const RecommendPage: React.FC = () => {
   const {
     recommendations,
     summary,
-    weights,
     filters,
     loading,
     error,
@@ -53,7 +52,6 @@ const RecommendPage: React.FC = () => {
     historyMarket,
     fetchRecommendations,
     fetchSummary,
-    fetchWeights,
     fetchHotSectors,
     triggerRefresh,
     setFilter,
@@ -66,8 +64,8 @@ const RecommendPage: React.FC = () => {
   const [smartRecommendAttempted, setSmartRecommendAttempted] = useState(false);
 
   useEffect(() => {
-    void Promise.all([fetchRecommendations(), fetchSummary(), fetchWeights()]);
-  }, [fetchRecommendations, fetchSummary, fetchWeights]);
+    void Promise.all([fetchRecommendations(), fetchSummary()]);
+  }, [fetchRecommendations, fetchSummary]);
 
   const handleViewModeChange = (mode: 'live' | 'history') => {
     setViewMode(mode);
@@ -293,7 +291,6 @@ const RecommendPage: React.FC = () => {
 
             <RecommendationTable
               recommendations={filteredRecommendations}
-              weights={weights}
               loading={loading}
               onRowClick={(stockCode) => {
                 const item = filteredRecommendations.find(r => r.stockCode === stockCode);

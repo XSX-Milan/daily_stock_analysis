@@ -72,6 +72,24 @@ const SettingsPage: React.FC = () => {
   const hasConfiguredChannels = Boolean((rawActiveItemMap.get('LLM_CHANNELS') || '').trim());
   const hasLitellmConfig = Boolean((rawActiveItemMap.get('LITELLM_CONFIG') || '').trim());
 
+  const recommendationItems = itemsByCategory['recommendation'] || [];
+  const recommendationItemMap = new Map(recommendationItems.map((item) => [item.key, String(item.value ?? '')]));
+  let recommendationSum = 0;
+  let hasRecommendationWeightError = false;
+
+  if (recommendationItems.length > 0 && recommendationItemMap.has('RECOMMEND_WEIGHT_TECHNICAL')) {
+    const tech = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_TECHNICAL') || 0);
+    const fund = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_FUNDAMENTAL') || 0);
+    const sent = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_SENTIMENT') || 0);
+    const macro = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_MACRO') || 0);
+    const risk = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_RISK') || 0);
+    
+    recommendationSum = tech + fund + sent + macro + risk;
+    if (Number.isNaN(recommendationSum) || recommendationSum !== 100) {
+      hasRecommendationWeightError = true;
+    }
+  }
+
   // Hide channel-managed and legacy provider-specific LLM keys from the
   // generic form only when channel config is the active runtime source.
   const LLM_CHANNEL_KEY_RE = /^LLM_[A-Z0-9]+_(PROTOCOL|BASE_URL|API_KEY|API_KEYS|MODELS|EXTRA_HEADERS|ENABLED)$/;
@@ -143,7 +161,7 @@ const SettingsPage: React.FC = () => {
               type="button"
               variant="settings-primary"
               onClick={() => void save()}
-              disabled={!hasDirty || isSaving || isLoading}
+              disabled={!hasDirty || isSaving || isLoading || hasRecommendationWeightError}
               isLoading={isSaving}
               loadingText="保存中..."
             >
@@ -158,6 +176,17 @@ const SettingsPage: React.FC = () => {
             error={saveError}
             actionLabel={retryAction === 'save' ? '重试保存' : undefined}
             onAction={retryAction === 'save' ? () => void retry() : undefined}
+          />
+        ) : null}
+
+        {hasRecommendationWeightError ? (
+          <SettingsAlert
+            className="mt-3"
+            title="推荐权重配置错误"
+            message={`推荐维度的五个权重总和必须等于 100，当前总和: ${Number.isNaN(recommendationSum) ? '包含非数字' : recommendationSum}`}
+            variant="error"
+            actionLabel={activeCategory !== 'recommendation' ? '前往修改' : undefined}
+            onAction={activeCategory !== 'recommendation' ? () => setActiveCategory('recommendation') : undefined}
           />
         ) : null}
       </div>

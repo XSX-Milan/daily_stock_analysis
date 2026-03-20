@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.runner import run_agent_loop, parse_dashboard_json
 from src.agent.tools.registry import ToolRegistry
+from src.report_language import normalize_report_language
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class AgentResult:
 # System prompt builder
 # ============================================================
 
-AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 Agent，拥有数据工具和交易策略，负责生成专业的【决策仪表盘】分析报告。
+AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 Agent，拥有数据工具和交易技能，负责生成专业的【决策仪表盘】分析报告。
 
 ## 工作流程（必须严格按阶段顺序执行，每阶段等工具结果返回后再进入下一阶段）
 
@@ -66,44 +67,13 @@ AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 
 **第四阶段 · 生成报告**（所有数据就绪后，输出完整决策仪表盘 JSON）
 
 > ⚠️ 每阶段的工具调用必须完整返回结果后，才能进入下一阶段。禁止将不同阶段的工具合并到同一次调用中。
-
-## 核心交易理念（必须严格遵守）
-
-### 1. 严进策略（不追高）
-- **绝对不追高**：当股价偏离 MA5 超过 5% 时，坚决不买入
-- 乖离率 < 2%：最佳买点区间
-- 乖离率 2-5%：可小仓介入
-- 乖离率 > 5%：严禁追高！直接判定为"观望"
-
-### 2. 趋势交易（顺势而为）
-- **多头排列必须条件**：MA5 > MA10 > MA20
-- 只做多头排列的股票，空头排列坚决不碰
-- 均线发散上行优于均线粘合
-
-### 3. 效率优先（筹码结构）
-- 关注筹码集中度：90%集中度 < 15% 表示筹码集中
-- 获利比例分析：70-90% 获利盘时需警惕获利回吐
-- 平均成本与现价关系：现价高于平均成本 5-15% 为健康
-
-### 4. 买点偏好（回踩支撑）
-- **最佳买点**：缩量回踩 MA5 获得支撑
-- **次优买点**：回踩 MA10 获得支撑
-- **观望情况**：跌破 MA20 时观望
-
-### 5. 风险排查重点
-- 减持公告、业绩预亏、监管处罚、行业政策利空、大额解禁
-
-### 6. 估值关注（PE/PB）
-- PE 明显偏高时需在风险点中说明
-
-### 7. 强势趋势股放宽
-- 强势趋势股可适当放宽乖离率要求，轻仓追踪但需设止损
+{default_skill_policy_section}
 
 ## 规则
 
 1. **必须调用工具获取真实数据** — 绝不编造数字，所有数据必须来自工具返回结果。
 2. **系统化分析** — 严格按工作流程分阶段执行，每阶段完整返回后再进入下一阶段，**禁止**将不同阶段的工具合并到同一次调用中。
-3. **应用交易策略** — 评估每个激活策略的条件，在报告中体现策略判断结果。
+3. **应用交易技能** — 评估每个激活技能的条件，在报告中体现技能判断结果。
 4. **输出格式** — 最终响应必须是有效的决策仪表盘 JSON。
 5. **风险优先** — 必须排查风险（股东减持、业绩预警、监管问题）。
 6. **工具失败处理** — 记录失败原因，使用已有数据继续分析，不重复调用失败工具。
@@ -204,9 +174,11 @@ AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
+
+{language_section}
 """
 
-CHAT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 Agent，拥有数据工具和交易策略，负责解答用户的股票投资问题。
+CHAT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 Agent，拥有数据工具和交易技能，负责解答用户的股票投资问题。
 
 ## 分析工作流程（必须严格按阶段执行，禁止跳步或合并阶段）
 
@@ -224,51 +196,58 @@ CHAT_SYSTEM_PROMPT = """你是一位专注于趋势交易的 A 股投资分析 A
 - 调用 `search_stock_news` 搜索最新新闻公告、减持、业绩预告等风险信号
 
 **第四阶段 · 综合分析**（所有工具数据就绪后生成回答）
-- 基于上述真实数据，结合激活策略进行综合研判，输出投资建议
+- 基于上述真实数据，结合激活技能进行综合研判，输出投资建议
 
 > ⚠️ 禁止将不同阶段的工具合并到同一次调用中（例如禁止在第一次调用中同时请求行情、技术指标和新闻）。
-
-## 核心交易理念（必须严格遵守）
-
-### 1. 严进策略（不追高）
-- **绝对不追高**：当股价偏离 MA5 超过 5% 时，坚决不买入
-- 乖离率 < 2%：最佳买点区间
-- 乖离率 2-5%：可小仓介入
-- 乖离率 > 5%：严禁追高！直接判定为"观望"
-
-### 2. 趋势交易（顺势而为）
-- **多头排列必须条件**：MA5 > MA10 > MA20
-- 只做多头排列的股票，空头排列坚决不碰
-- 均线发散上行优于均线粘合
-
-### 3. 效率优先（筹码结构）
-- 关注筹码集中度：90%集中度 < 15% 表示筹码集中
-- 获利比例分析：70-90% 获利盘时需警惕获利回吐
-- 平均成本与现价关系：现价高于平均成本 5-15% 为健康
-
-### 4. 买点偏好（回踩支撑）
-- **最佳买点**：缩量回踩 MA5 获得支撑
-- **次优买点**：回踩 MA10 获得支撑
-- **观望情况**：跌破 MA20 时观望
-
-### 5. 风险排查重点
-- 减持公告、业绩预亏、监管处罚、行业政策利空、大额解禁
-
-### 6. 估值关注（PE/PB）
-- PE 明显偏高时需在风险点中说明
-
-### 7. 强势趋势股放宽
-- 强势趋势股可适当放宽乖离率要求，轻仓追踪但需设止损
+{default_skill_policy_section}
 
 ## 规则
 
 1. **必须调用工具获取真实数据** — 绝不编造数字，所有数据必须来自工具返回结果。
-2. **应用交易策略** — 评估每个激活策略的条件，在回答中体现策略判断结果。
+2. **应用交易技能** — 评估每个激活技能的条件，在回答中体现技能判断结果。
 3. **自由对话** — 根据用户的问题，自由组织语言回答，不需要输出 JSON。
 4. **风险优先** — 必须排查风险（股东减持、业绩预警、监管问题）。
 5. **工具失败处理** — 记录失败原因，使用已有数据继续分析，不重复调用失败工具。
 
 {skills_section}
+{language_section}
+"""
+
+
+def _build_language_section(report_language: str, *, chat_mode: bool = False) -> str:
+    """Build output-language guidance for the agent prompt."""
+    normalized = normalize_report_language(report_language)
+    if chat_mode:
+        if normalized == "en":
+            return """
+## Output Language
+
+- Reply in English.
+- If you output JSON, keep the keys unchanged and write every human-readable value in English.
+"""
+        return """
+## 输出语言
+
+- 默认使用中文回答。
+- 若输出 JSON，键名保持不变，所有面向用户的文本值使用中文。
+"""
+
+    if normalized == "en":
+        return """
+## Output Language
+
+- Keep every JSON key unchanged.
+- `decision_type` must remain `buy|hold|sell`.
+- All human-readable JSON values must be written in English.
+- This includes `stock_name`, `trend_prediction`, `operation_advice`, `confidence_level`, all dashboard text, checklist items, and summaries.
+"""
+
+    return """
+## 输出语言
+
+- 所有 JSON 键名保持不变。
+- `decision_type` 必须保持为 `buy|hold|sell`。
+- 所有面向用户的人类可读文本值必须使用中文。
 """
 
 
@@ -290,12 +269,16 @@ class AgentExecutor:
         tool_registry: ToolRegistry,
         llm_adapter: LLMToolAdapter,
         skill_instructions: str = "",
+        default_skill_policy: str = "",
         max_steps: int = 10,
+        timeout_seconds: Optional[float] = None,
     ):
         self.tool_registry = tool_registry
         self.llm_adapter = llm_adapter
         self.skill_instructions = skill_instructions
+        self.default_skill_policy = default_skill_policy
         self.max_steps = max_steps
+        self.timeout_seconds = timeout_seconds
 
     def run(self, task: str, context: Optional[Dict[str, Any]] = None) -> AgentResult:
         """Execute the agent loop for a given task.
@@ -310,8 +293,16 @@ class AgentExecutor:
         # Build system prompt with skills
         skills_section = ""
         if self.skill_instructions:
-            skills_section = f"## 激活的交易策略\n\n{self.skill_instructions}"
-        system_prompt = AGENT_SYSTEM_PROMPT.format(skills_section=skills_section)
+            skills_section = f"## 激活的交易技能\n\n{self.skill_instructions}"
+        default_skill_policy_section = ""
+        if self.default_skill_policy:
+            default_skill_policy_section = f"\n{self.default_skill_policy}\n"
+        report_language = normalize_report_language((context or {}).get("report_language", "zh"))
+        system_prompt = AGENT_SYSTEM_PROMPT.format(
+            default_skill_policy_section=default_skill_policy_section,
+            skills_section=skills_section,
+            language_section=_build_language_section(report_language),
+        )
 
         # Build tool declarations in OpenAI format (litellm handles all providers)
         tool_decls = self.tool_registry.to_openai_tools()
@@ -341,8 +332,16 @@ class AgentExecutor:
         # Build system prompt with skills
         skills_section = ""
         if self.skill_instructions:
-            skills_section = f"## 激活的交易策略\n\n{self.skill_instructions}"
-        system_prompt = CHAT_SYSTEM_PROMPT.format(skills_section=skills_section)
+            skills_section = f"## 激活的交易技能\n\n{self.skill_instructions}"
+        default_skill_policy_section = ""
+        if self.default_skill_policy:
+            default_skill_policy_section = f"\n{self.default_skill_policy}\n"
+        report_language = normalize_report_language((context or {}).get("report_language", "zh"))
+        system_prompt = CHAT_SYSTEM_PROMPT.format(
+            default_skill_policy_section=default_skill_policy_section,
+            skills_section=skills_section,
+            language_section=_build_language_section(report_language, chat_mode=True),
+        )
 
         # Build tool declarations in OpenAI format (litellm handles all providers)
         tool_decls = self.tool_registry.to_openai_tools()
@@ -410,6 +409,7 @@ class AgentExecutor:
             llm_adapter=self.llm_adapter,
             max_steps=self.max_steps,
             progress_callback=progress_callback,
+            max_wall_clock_seconds=self.timeout_seconds,
         )
 
         model_str = loop_result.model
@@ -444,10 +444,15 @@ class AgentExecutor:
         """Build the initial user message."""
         parts = [task]
         if context:
+            report_language = normalize_report_language(context.get("report_language", "zh"))
             if context.get("stock_code"):
                 parts.append(f"\n股票代码: {context['stock_code']}")
             if context.get("report_type"):
                 parts.append(f"报告类型: {context['report_type']}")
+            if report_language == "en":
+                parts.append("输出语言: English（所有 JSON 键名保持不变，所有面向用户的文本值使用英文）")
+            else:
+                parts.append("输出语言: 中文（所有 JSON 键名保持不变，所有面向用户的文本值使用中文）")
 
             # Inject pre-fetched context data to avoid redundant fetches
             if context.get("realtime_quote"):

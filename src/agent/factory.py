@@ -1,8 +1,30 @@
 # -*- coding: utf-8 -*-
-"""Shared factory for building configured agent executors/orchestrators."""
+"""
+Shared factory for building fully-configured AgentExecutor instances.
+
+Centralises construction to eliminate boilerplate duplicated across
+api/v1/endpoints/agent.py, bot/commands/chat.py, bot/commands/ask.py,
+and src/core/pipeline.py.
+
+Performance notes
+-----------------
+* ``ToolRegistry`` is built once and cached at module level — tool
+  registrations are immutable after setup so the object is safe to share
+  across every request.
+* ``SkillManager`` is expensive to create (loads YAML files from disk).
+  A prototype is built on first use and cheap ``deepcopy`` clones are
+  returned for each request, preserving thread-safety (``activate()``
+  mutates internal state).
+
+Usage::
+
+    from src.agent.factory import build_agent_executor
+
+    executor = build_agent_executor(config, skills=["bull_trend", "shrink_pullback"])
+    result   = executor.chat(message="...", session_id="...")
+"""
 
 import copy
-import importlib
 import logging
 from typing import List, Optional
 
@@ -17,20 +39,8 @@ _SKILL_MANAGER_PROTOTYPE = None
 # on the very first call, forcing a build rather than accidentally skipping it.
 _SENTINEL = object()
 # Track which custom_dir the prototype was built with so we can invalidate
-# the cache if AGENT_STRATEGY_DIR changes at runtime (e.g. via config reload).
+# the cache if AGENT_SKILL_DIR changes at runtime (e.g. via config reload).
 _SKILL_MANAGER_CUSTOM_DIR: object = _SENTINEL
-
-DEFAULT_AGENT_SKILLS = [
-    "bull_trend",
-    "ma_golden_cross",
-    "volume_breakout",
-    "shrink_pullback",
-]
-
-
-def _get_runtime_config():
-    config_module = importlib.import_module("src.config")
-    return config_module.get_config()
 
 
 def get_tool_registry():
@@ -72,15 +82,17 @@ def get_skill_manager(config=None):
     YAML files.  Each clone is independent so ``.activate()`` calls do not
     bleed between requests.
 
-    Cache invalidation: if ``config.agent_strategy_dir`` changes at runtime
+    Cache invalidation: if ``config.agent_skill_dir`` changes at runtime
     (e.g. via the web settings reload), the prototype is rebuilt automatically.
     """
     global _SKILL_MANAGER_PROTOTYPE, _SKILL_MANAGER_CUSTOM_DIR
 
     if config is None:
-        config = _get_runtime_config()
+        from src.config import get_config
 
-    current_custom_dir = getattr(config, "agent_strategy_dir", None)
+        config = get_config()
+
+    current_custom_dir = getattr(config, "agent_skill_dir", None)
     if (
         _SKILL_MANAGER_PROTOTYPE is not None
         and current_custom_dir == _SKILL_MANAGER_CUSTOM_DIR
@@ -91,20 +103,20 @@ def get_skill_manager(config=None):
 
     if _SKILL_MANAGER_PROTOTYPE is not None:
         logger.info(
-            "[AgentFactory] SkillManager prototype invalidated (agent_strategy_dir changed: %r → %r)",
+            "[AgentFactory] SkillManager prototype invalidated (agent_skill_dir changed: %r -> %r)",
             _SKILL_MANAGER_CUSTOM_DIR,
             current_custom_dir,
         )
 
     skill_manager = SkillManager()
-    skill_manager.load_builtin_strategies()
+    skill_manager.load_builtin_skills()
 
     if current_custom_dir:
         try:
-            skill_manager.load_custom_strategies(current_custom_dir)
+            skill_manager.load_custom_skills(current_custom_dir)
         except Exception as exc:
             logger.warning(
-                "[AgentFactory] Failed to load custom strategies from %s: %s",
+                "[AgentFactory] Failed to load custom skills from %s: %s",
                 current_custom_dir,
                 exc,
             )
@@ -112,7 +124,7 @@ def get_skill_manager(config=None):
     _SKILL_MANAGER_PROTOTYPE = skill_manager
     _SKILL_MANAGER_CUSTOM_DIR = current_custom_dir
     logger.info(
-        "[AgentFactory] SkillManager prototype cached (%d strategies)",
+        "[AgentFactory] SkillManager prototype cached (%d skills)",
         len(skill_manager._skills),
     )
     return copy.deepcopy(_SKILL_MANAGER_PROTOTYPE)
@@ -128,36 +140,58 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
     Args:
         config: Application config object.  When *None*, ``get_config()`` is
                 called automatically.
-        skills: Strategy ids to activate.  When *None* falls back to
+        skills: Skill ids to activate.  When *None* falls back to
                 ``config.agent_skills``; if that is also empty falls back to
-                ``DEFAULT_AGENT_SKILLS``.
+                the central default skill set.
 
     Returns:
-        A ready-to-call executor/orchestrator instance exposing ``run`` and ``chat``.
+        A ready-to-call :class:`src.agent.executor.AgentExecutor` instance.
     """
     if config is None:
-        config = _get_runtime_config()
+        from src.config import get_config
+
+        config = get_config()
 
     arch = getattr(config, "agent_arch", "single")
+
     from src.agent.llm_adapter import LLMToolAdapter
+    from src.agent.skills.defaults import (
+        get_default_active_skill_ids,
+        get_default_technical_skill_policy,
+        get_default_trading_skill_policy,
+    )
 
     registry = get_tool_registry()
     skill_manager = get_skill_manager(config)
 
-    skills_to_activate = (
-        skills
-        if skills is not None
-        else (getattr(config, "agent_skills", None) or DEFAULT_AGENT_SKILLS)
-    )
-    skill_manager.activate(skills_to_activate if skills_to_activate else ["all"])
+    configured_skills = getattr(config, "agent_skills", None) or None
+    explicit_skill_selection = bool(skills) or configured_skills is not None
+    default_skills = get_default_active_skill_ids(skill_manager.list_skills())
+    if skills is not None:
+        skills_to_activate = skills or default_skills
+    else:
+        skills_to_activate = configured_skills or default_skills
+    skill_manager.activate(skills_to_activate)
     logger.info(
-        "[AgentFactory] Activated strategies: %s (arch=%s)", skills_to_activate, arch
+        "[AgentFactory] Activated skills: %s (arch=%s)", skills_to_activate, arch
     )
 
     llm_adapter = LLMToolAdapter(config)
+    default_skill_policy = get_default_trading_skill_policy(
+        explicit_skill_selection=explicit_skill_selection,
+    )
+    technical_skill_policy = get_default_technical_skill_policy(
+        explicit_skill_selection=explicit_skill_selection,
+    )
 
     if arch == "multi":
-        return _build_orchestrator(config, registry, llm_adapter, skill_manager)
+        return _build_orchestrator(
+            config,
+            registry,
+            llm_adapter,
+            skill_manager,
+            technical_skill_policy=technical_skill_policy,
+        )
 
     from src.agent.executor import AgentExecutor
 
@@ -165,11 +199,15 @@ def build_agent_executor(config=None, skills: Optional[List[str]] = None):
         tool_registry=registry,
         llm_adapter=llm_adapter,
         skill_instructions=skill_manager.get_skill_instructions(),
+        default_skill_policy=default_skill_policy,
         max_steps=getattr(config, "agent_max_steps", 10),
+        timeout_seconds=getattr(config, "agent_orchestrator_timeout_s", 0),
     )
 
 
-def _build_orchestrator(config, registry, llm_adapter, skill_manager):
+def _build_orchestrator(
+    config, registry, llm_adapter, skill_manager, *, technical_skill_policy: str = ""
+):
     """Build and return an :class:`AgentOrchestrator` (multi-agent mode).
 
     The orchestrator presents the same ``run()`` / ``chat()`` interface as
@@ -184,6 +222,7 @@ def _build_orchestrator(config, registry, llm_adapter, skill_manager):
         tool_registry=registry,
         llm_adapter=llm_adapter,
         skill_instructions=skill_manager.get_skill_instructions(),
+        technical_skill_policy=technical_skill_policy,
         max_steps=getattr(config, "agent_max_steps", 10),
         mode=mode,
         skill_manager=skill_manager,
@@ -192,25 +231,30 @@ def _build_orchestrator(config, registry, llm_adapter, skill_manager):
 
 
 def build_recommendation_agent(
-    config=None,
-    dimension: Optional[str] = None,
-    skills: Optional[List[str]] = None,
+    config=None, dimension: Optional[str] = None, skills: Optional[List[str]] = None
 ):
-    """Build and return a recommendation agent instance."""
     if config is None:
-        config = _get_runtime_config()
+        from src.config import get_config
 
+        config = get_config()
+
+    from src.agent.agents.recommendation_agent import RecommendationAgent
     from src.agent.llm_adapter import LLMToolAdapter
+    from src.agent.skills.defaults import get_default_active_skill_ids
 
     registry = get_tool_registry()
     skill_manager = get_skill_manager(config)
 
-    skills_to_activate = (
-        skills
-        if skills is not None
-        else (getattr(config, "agent_skills", None) or DEFAULT_AGENT_SKILLS)
+    configured_skills = getattr(config, "agent_skills", None) or None
+    default_skills = get_default_active_skill_ids(skill_manager.list_skills())
+    if skills is not None:
+        skills_to_activate = skills or default_skills
+    else:
+        skills_to_activate = configured_skills or default_skills
+    skill_manager.activate(skills_to_activate)
+    logger.info(
+        "[AgentFactory] Activated skills: %s (recommendation)", skills_to_activate
     )
-    skill_manager.activate(skills_to_activate if skills_to_activate else ["all"])
 
     llm_adapter = LLMToolAdapter(config)
     common_kwargs = {
@@ -219,26 +263,9 @@ def build_recommendation_agent(
         "skill_instructions": skill_manager.get_skill_instructions(),
     }
 
-    try:
-        recommendation_module = importlib.import_module(
-            "src.agent.agents.recommendation_agent"
-        )
-        recommendation_cls = getattr(recommendation_module, "RecommendationAgent")
-    except Exception as exc:
-        raise ImportError(
-            "Unified RecommendationAgent implementation is not available"
-        ) from exc
-
     if dimension is not None:
-        try:
-            return recommendation_cls(dimension=dimension, **common_kwargs)
-        except TypeError as exc:
-            logger.warning(
-                "RecommendationAgent dimension argument is not supported, fallback without dimension: %s",
-                exc,
-            )
-
-    return recommendation_cls(**common_kwargs)
+        return RecommendationAgent(dimension=dimension, **common_kwargs)
+    return RecommendationAgent(**common_kwargs)
 
 
 # Keep legacy alias so any external callers using the old name still work.

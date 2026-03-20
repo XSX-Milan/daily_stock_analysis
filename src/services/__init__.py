@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from src.services.analysis_service import AnalysisService
     from src.services.backtest_service import BacktestService
     from src.services.history_service import HistoryService
+    from src.services.recommendation_service import RecommendationService
     from src.services.sector_scanner_service import SectorScannerService
     from src.services.stock_service import StockService
     from src.services.task_service import TaskService, get_task_service
@@ -41,6 +42,15 @@ def __getattr__(name: str):
 
         module = importlib.import_module(_lazy_map[name])
         return getattr(module, name)
+    if name == "recommendation_service":
+        import importlib
+
+        return importlib.import_module("src.services.recommendation_service")
+    if name == "RecommendationService":
+        import importlib
+
+        module = importlib.import_module("src.services.recommendation_service")
+        return getattr(module, name)
     raise AttributeError(f"module 'src.services' has no attribute {name!r}")
 
 
@@ -48,6 +58,7 @@ __all__ = [
     "AnalysisService",
     "BacktestService",
     "HistoryService",
+    "RecommendationService",
     "SectorScannerService",
     "StockService",
     "TaskService",

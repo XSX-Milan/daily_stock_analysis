@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-名称→代码解析引擎
+Name-to-Code Resolution Engine
 ===================================
 
 Resolve stock name to code: local mapping + pinyin + AkShare fallback + fuzzy matching.
@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 
 # AkShare result cache: (timestamp, name_to_code_dict)
 _akshare_cache: Optional[tuple[float, Dict[str, str]]] = None
-_AKSHARE_CACHE_TTL = 3600  # 1 hour
+_AKSHARE_CACHE_TTL = 1800  # 30 MIN
+
+
+def _contains_cjk(text: str) -> bool:
+    """Return True when text contains CJK characters."""
+    return any("\u3400" <= ch <= "\u9fff" for ch in text)
 
 
 def _is_code_like(s: str) -> bool:
@@ -145,6 +150,12 @@ def resolve_name_to_code(name: str) -> Optional[str]:
         pass
     except Exception as e:
         logger.debug(f"[NameResolver] Pinyin match failed: {e}")
+
+    # Skip AkShare/fuzzy fallback for non-CJK free text such as random Latin noise.
+    # These paths are expensive and only meaningfully help Chinese stock names.
+    if not _contains_cjk(s):
+        logger.debug(f"[NameResolver] Skip CJK-only fallbacks for non-CJK input: {s}")
+        return None
 
     # 4. AkShare fallback
     akshare_map = _get_akshare_name_to_code()

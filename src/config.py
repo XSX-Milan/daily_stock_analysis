@@ -229,6 +229,46 @@ def get_configured_llm_models(model_list: List[Dict[str, Any]]) -> List[str]:
     return models
 
 
+def get_effective_agent_primary_model(config: "Config") -> str:
+    configured_router_models = set(
+        get_configured_llm_models(getattr(config, "llm_model_list", []) or [])
+    )
+    configured_agent_model = str(
+        getattr(config, "agent_litellm_model", "") or ""
+    ).strip()
+    if configured_agent_model:
+        if "/" in configured_agent_model:
+            return configured_agent_model
+        if configured_agent_model in configured_router_models:
+            return configured_agent_model
+        protocol = str(getattr(config, "llm_channel_protocol", "") or "").strip()
+        base_url = str(getattr(config, "llm_channel_base_url", "") or "").strip()
+        return normalize_llm_channel_model(
+            configured_agent_model,
+            protocol,
+            base_url,
+        )
+    return (getattr(config, "litellm_model", "") or "").strip()
+
+
+def get_effective_agent_models_to_try(config: "Config") -> List[str]:
+    raw_models = [get_effective_agent_primary_model(config)] + (
+        getattr(config, "litellm_fallback_models", []) or []
+    )
+    seen = set()
+    ordered_models: List[str] = []
+    for model in raw_models:
+        normalized_model = (model or "").strip()
+        if not normalized_model:
+            continue
+        dedupe_key = normalized_model.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        ordered_models.append(normalized_model)
+    return ordered_models
+
+
 def resolve_unified_llm_temperature(model: str) -> float:
     """Resolve the unified LLM temperature with backward-compatible fallbacks."""
     llm_temperature_raw = os.getenv("LLM_TEMPERATURE")

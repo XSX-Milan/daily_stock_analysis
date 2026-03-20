@@ -17,6 +17,7 @@ from src.config import (
     canonicalize_llm_channel_protocol,
     channel_allows_empty_api_key,
     get_configured_llm_models,
+    normalize_agent_litellm_model,
     normalize_news_strategy_profile,
     normalize_llm_channel_model,
     parse_env_bool,
@@ -54,6 +55,18 @@ class ConfigConflictError(Exception):
 class SystemConfigService:
     """Service layer for reading, validating, and updating runtime configuration."""
 
+    _DISPLAY_KEY_ALIASES: Dict[str, Tuple[str, ...]] = {
+        "AGENT_SKILL_DIR": ("AGENT_SKILL_DIR", "AGENT_STRATEGY_DIR"),
+        "AGENT_SKILL_AUTOWEIGHT": ("AGENT_SKILL_AUTOWEIGHT", "AGENT_STRATEGY_AUTOWEIGHT"),
+        "AGENT_SKILL_ROUTING": ("AGENT_SKILL_ROUTING", "AGENT_STRATEGY_ROUTING"),
+    }
+    _DISPLAY_VALUE_ALIASES: Dict[str, Dict[str, str]] = {
+        "AGENT_ORCHESTRATOR_MODE": {
+            "strategy": "specialist",
+            "skill": "specialist",
+        }
+    }
+
     def __init__(self, manager: Optional[ConfigManager] = None):
         self._manager = manager or ConfigManager()
 
@@ -70,9 +83,65 @@ class SystemConfigService:
         reset_fetcher_manager()
         reset_search_service()
 
+    @classmethod
+    def _normalize_display_value(cls, key: str, value: str) -> str:
+        alias_map = cls._DISPLAY_VALUE_ALIASES.get(key.upper())
+        if not alias_map:
+            return value
+        return alias_map.get(value.strip().lower(), value)
+
+    @classmethod
+    def _build_display_config_map(cls, raw_config_map: Dict[str, str]) -> Dict[str, str]:
+        raw_upper = {key.upper(): value for key, value in raw_config_map.items()}
+        aliased_keys = {
+            alias
+            for candidates in cls._DISPLAY_KEY_ALIASES.values()
+            for alias in candidates
+        }
+        display_map: Dict[str, str] = {}
+
+        for key, value in raw_upper.items():
+            if key in aliased_keys:
+                continue
+            display_map[key] = cls._normalize_display_value(key, value)
+
+        for canonical_key, candidates in cls._DISPLAY_KEY_ALIASES.items():
+            canonical_env_key = candidates[0]
+            if canonical_env_key in raw_upper:
+                display_map[canonical_key] = cls._normalize_display_value(
+                    canonical_key,
+                    raw_upper[canonical_env_key],
+                )
+                continue
+
+            selected_value: Optional[str] = None
+            candidate_seen = False
+            for candidate_key in candidates[1:]:
+                if candidate_key not in raw_upper:
+                    continue
+                candidate_seen = True
+                candidate_value = raw_upper[candidate_key]
+                if candidate_value:
+                    selected_value = candidate_value
+                    break
+            if candidate_seen:
+                if selected_value is None:
+                    for candidate_key in candidates[1:]:
+                        if candidate_key in raw_upper:
+                            selected_value = raw_upper[candidate_key]
+                            break
+                if selected_value is None:
+                    selected_value = ""
+                display_map[canonical_key] = cls._normalize_display_value(
+                    canonical_key,
+                    selected_value,
+                )
+
+        return display_map
+
     def get_config(self, include_schema: bool = True, mask_token: str = "******") -> Dict[str, Any]:
         """Return current config values without server-side secret masking."""
-        config_map = self._manager.read_config_map()
+        config_map = self._build_display_config_map(self._manager.read_config_map())
         registered_keys = set(get_registered_field_keys())
         all_keys = set(config_map.keys()) | registered_keys
 
@@ -767,6 +836,11 @@ class SystemConfigService:
             if not raw_channels:
                 return issues
 
+            configured_agent_model_raw = (effective_map.get("AGENT_LITELLM_MODEL") or "").strip()
+            configured_agent_model = normalize_agent_litellm_model(
+                configured_agent_model_raw,
+                configured_models=available_model_set,
+            )
             primary_model = (effective_map.get("LITELLM_MODEL") or "").strip()
             if primary_model and not SystemConfigService._has_runtime_source_for_model(primary_model, effective_map):
                 issues.append(
@@ -780,6 +854,28 @@ class SystemConfigService:
                         "severity": "error",
                         "expected": "enabled channel model or matching legacy API key",
                         "actual": primary_model,
+                    }
+                )
+
+            if (
+                configured_agent_model_raw
+                and configured_agent_model
+                and not SystemConfigService._has_runtime_source_for_model(
+                    configured_agent_model,
+                    effective_map,
+                )
+            ):
+                issues.append(
+                    {
+                        "key": "AGENT_LITELLM_MODEL",
+                        "code": "missing_runtime_source",
+                        "message": (
+                            "AGENT_LITELLM_MODEL is set, but there are no enabled channel models "
+                            "or matching legacy API keys for it"
+                        ),
+                        "severity": "error",
+                        "expected": "enabled channel model or matching legacy API key",
+                        "actual": configured_agent_model,
                     }
                 )
 
@@ -838,6 +934,31 @@ class SystemConfigService:
                     "severity": "error",
                     "expected": "one configured channel model",
                     "actual": primary_model,
+                }
+            )
+
+        configured_agent_model_raw = (effective_map.get("AGENT_LITELLM_MODEL") or "").strip()
+        configured_agent_model = normalize_agent_litellm_model(
+            configured_agent_model_raw,
+            configured_models=available_model_set,
+        )
+        if (
+            configured_agent_model_raw
+            and configured_agent_model
+            and configured_agent_model not in available_model_set
+            and not _uses_direct_env_provider(configured_agent_model)
+        ):
+            issues.append(
+                {
+                    "key": "AGENT_LITELLM_MODEL",
+                    "code": "unknown_model",
+                    "message": (
+                        "AGENT_LITELLM_MODEL is not declared by the current enabled channels. "
+                        f"Available models: {', '.join(available_models[:6])}"
+                    ),
+                    "severity": "error",
+                    "expected": "one configured channel model",
+                    "actual": configured_agent_model,
                 }
             )
 

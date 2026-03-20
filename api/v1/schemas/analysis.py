@@ -14,6 +14,7 @@ from typing import Optional, List, Any
 from enum import Enum
 
 from pydantic import BaseModel, Field
+from src.utils.analysis_metadata import SELECTION_SOURCE_PATTERN
 
 
 class TaskStatusEnum(str, Enum):
@@ -25,7 +26,7 @@ class TaskStatusEnum(str, Enum):
 
 
 class AnalyzeRequest(BaseModel):
-    """分析请求模型"""
+    """Analysis request parameters"""
     
     stock_code: Optional[str] = Field(
         None, 
@@ -43,12 +44,28 @@ class AnalyzeRequest(BaseModel):
         pattern="^(simple|detailed|full|brief)$",
     )
     force_refresh: bool = Field(
-        True,
+        False,
         description="是否强制刷新（忽略缓存）"
     )
     async_mode: bool = Field(
         False,
         description="是否使用异步模式"
+    )
+    stock_name: Optional[str] = Field(
+        None,
+        description="用户选中的股票名称（自动补全时提供）",
+        example="贵州茅台"
+    )
+    original_query: Optional[str] = Field(
+        None,
+        description="用户原始输入（如茅台、gzmt、600519）",
+        example="茅台"
+    )
+    selection_source: Optional[str] = Field(
+        None,
+        description="股票选择来源：manual(手动输入) | autocomplete(自动补全) | import(导入) | image(图片识别)",
+        pattern=SELECTION_SOURCE_PATTERN,
+        example="autocomplete"
     )
     
     class Config:
@@ -57,7 +74,10 @@ class AnalyzeRequest(BaseModel):
                 "stock_code": "600519",
                 "report_type": "detailed",
                 "force_refresh": False,
-                "async_mode": False
+                "async_mode": False,
+                "stock_name": "贵州茅台",
+                "original_query": "茅台",
+                "selection_source": "autocomplete"
             }
         }
 
@@ -180,7 +200,7 @@ class BatchTaskAcceptedResponse(BaseModel):
 
 
 class TaskStatus(BaseModel):
-    """任务状态模型"""
+    """Task status model"""
     
     task_id: str = Field(..., description="任务 ID")
     status: str = Field(
@@ -202,6 +222,13 @@ class TaskStatus(BaseModel):
         None, 
         description="错误信息（仅在 failed 时存在）"
     )
+    stock_name: Optional[str] = Field(None, description="股票名称")
+    original_query: Optional[str] = Field(None, description="用户原始输入")
+    selection_source: Optional[str] = Field(
+        None,
+        description="选择来源",
+        pattern=SELECTION_SOURCE_PATTERN,
+    )
     
     class Config:
         json_schema_extra = {
@@ -210,16 +237,19 @@ class TaskStatus(BaseModel):
                 "status": "completed",
                 "progress": 100,
                 "result": None,
-                "error": None
+                "error": None,
+                "stock_name": "贵州茅台",
+                "original_query": "茅台",
+                "selection_source": "autocomplete"
             }
         }
 
 
 class TaskInfo(BaseModel):
     """
-    任务详情模型
-    
-    用于任务列表和 SSE 事件推送
+    Task details model
+
+    Used for task list and SSE event delivery
     """
     
     task_id: str = Field(..., description="任务 ID")
@@ -233,6 +263,12 @@ class TaskInfo(BaseModel):
     started_at: Optional[str] = Field(None, description="开始执行时间")
     completed_at: Optional[str] = Field(None, description="完成时间")
     error: Optional[str] = Field(None, description="错误信息（仅在 failed 时存在）")
+    original_query: Optional[str] = Field(None, description="用户原始输入")
+    selection_source: Optional[str] = Field(
+        None,
+        description="选择来源",
+        pattern=SELECTION_SOURCE_PATTERN,
+    )
     
     class Config:
         json_schema_extra = {
@@ -247,7 +283,9 @@ class TaskInfo(BaseModel):
                 "created_at": "2026-02-05T10:30:00",
                 "started_at": "2026-02-05T10:30:01",
                 "completed_at": None,
-                "error": None
+                "error": None,
+                "original_query": "茅台",
+                "selection_source": "autocomplete"
             }
         }
 

@@ -19,6 +19,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional, Union, Dict, Any
 
@@ -46,8 +47,11 @@ from api.v1.schemas.history import (
     ReportStrategy,
     ReportDetails,
 )
-from data_provider.base import canonical_stock_code
+from data_provider.base import canonical_stock_code, normalize_stock_code
 from src.config import Config
+from src.report_language import get_localized_stock_name, normalize_report_language
+from src.services.name_to_code_resolver import resolve_name_to_code
+from src.services.stock_code_utils import is_code_like
 from src.services.task_queue import (
     get_task_queue,
     DuplicateTaskError,
@@ -62,6 +66,56 @@ from src.utils.data_processing import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_SUPPORTED_FREE_TEXT_RE = re.compile(r"^[A-Za-z0-9.*\-+\u3400-\u9fff\s]+$")
+
+
+def _invalid_analysis_input_error() -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": "validation_error",
+            "message": "请输入有效的股票代码或股票名称",
+        },
+    )
+
+
+def _is_obviously_invalid_analysis_input(text: str) -> bool:
+    """Reject mixed alphanumeric noise and unsupported symbols early."""
+    if not text or is_code_like(text):
+        return False
+
+    if not _SUPPORTED_FREE_TEXT_RE.fullmatch(text):
+        return True
+
+    has_letters = any(ch.isalpha() and ch.isascii() for ch in text)
+    has_digits = any(ch.isdigit() for ch in text)
+    return has_letters and has_digits
+
+
+def _resolve_and_normalize_input(raw_value: str) -> str:
+    """
+    Resolve and normalize a stock input for analysis requests.
+
+    Code-like values keep the existing canonical path.
+    Non-code inputs must resolve to a known stock code. Obvious garbage
+    input is rejected before expensive resolver and task-queue work.
+    """
+    text = (raw_value or "").strip()
+    if not text:
+        return ""
+
+    if is_code_like(text):
+        return canonical_stock_code(text)
+
+    if _is_obviously_invalid_analysis_input(text):
+        raise _invalid_analysis_input_error()
+
+    resolved = resolve_name_to_code(text)
+    if resolved:
+        return canonical_stock_code(resolved)
+
+    raise _invalid_analysis_input_error()
 
 
 # ============================================================
@@ -127,10 +181,32 @@ def trigger_analysis(
             }
         )
 
-    # 统一大小写后去重，确保 ['aapl', 'AAPL'] 被识别为同一股票（Issue #355）
-    stock_codes = [canonical_stock_code(c) for c in stock_codes]
-    stock_codes = [c for c in stock_codes if c]
-    stock_codes = list(dict.fromkeys(stock_codes))
+    # Normalize and de-duplicate inputs while preserving compatibility.
+    resolved = [_resolve_and_normalize_input(c) for c in stock_codes]
+    
+    seen = set()
+    unique_codes = []
+    for code in resolved:
+        if not code:
+            continue
+        # Use normalize_stock_code to ensure '600519' and '600519.SH' are merged
+        norm = normalize_stock_code(code)
+        if norm not in seen:
+            seen.add(norm)
+            unique_codes.append(code)
+    
+    stock_codes = unique_codes
+
+    # Limit the number of stocks in a single request to prevent DoS
+    MAX_BATCH_SIZE = 50
+    if len(stock_codes) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "validation_error",
+                "message": f"单次分析请求最多支持 {MAX_BATCH_SIZE} 只股票"
+            }
+        )
 
     if not stock_codes:
         raise HTTPException(
@@ -141,7 +217,7 @@ def trigger_analysis(
             }
         )
 
-    # 同步模式仅支持单只股票
+    # Sync mode only supports single-stock analysis.
     if not request.async_mode:
         if len(stock_codes) > 1:
             raise HTTPException(
@@ -153,7 +229,7 @@ def trigger_analysis(
             )
         return _handle_sync_analysis(stock_codes[0], request)
 
-    # 异步模式：为每只股票提交任务
+    # Async mode submits one task per stock.
     return _handle_async_analysis_batch(stock_codes, request)
 
 
@@ -162,15 +238,25 @@ def _handle_async_analysis_batch(
     request: AnalyzeRequest
 ) -> JSONResponse:
     """
-    处理异步分析请求（支持批量）
-    
-    为每只股票提交任务到队列，立即返回 202
-    如果仅一只股票且正在分析中，返回 409
+    Handle asynchronous analysis requests, including batch submission.
     """
     task_queue = get_task_queue()
+    
+    # Preserve metadata for single-stock requests. For batch requests,
+    # only carry through metadata that semantically applies to the whole
+    # batch, such as import/image source tracking.
+    is_single = len(stock_codes) == 1
+    preserve_batch_metadata = request.selection_source in {"import", "image"}
+
+    stock_name = request.stock_name if is_single else None
+    original_query = request.original_query if (is_single or preserve_batch_metadata) else None
+    selection_source = request.selection_source if (is_single or preserve_batch_metadata) else None
+
     accepted_tasks, duplicate_errors = task_queue.submit_tasks_batch(
         stock_codes=stock_codes,
-        stock_name=None,
+        stock_name=stock_name,
+        original_query=original_query,
+        selection_source=selection_source,
         report_type=request.report_type,
         force_refresh=request.force_refresh,
     )
@@ -356,6 +442,8 @@ def get_task_list(
             started_at=t.started_at.isoformat() if t.started_at else None,
             completed_at=t.completed_at.isoformat() if t.completed_at else None,
             error=t.error,
+            original_query=t.original_query,
+            selection_source=t.selection_source,
         )
         for t in all_tasks
     ]
@@ -490,8 +578,11 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             task_id=task.task_id,
             status=task.status.value,
             progress=task.progress,
-            result=None,  # 进行中的任务没有结果
+            result=None,  # In-progress tasks do not carry a result payload.
             error=task.error,
+            stock_name=task.stock_name,
+            original_query=task.original_query,
+            selection_source=task.selection_source,
         )
     
     # 2. 从数据库查询已完成的记录
@@ -506,14 +597,19 @@ def get_analysis_status(task_id: str) -> TaskStatus:
             model_used = normalize_model_used(
                 (raw_result or {}).get("model_used") if isinstance(raw_result, dict) else None
             )
+            report_language = normalize_report_language(
+                (raw_result or {}).get("report_language") if isinstance(raw_result, dict) else None
+            )
+            stock_name = get_localized_stock_name(record.name, record.code, report_language)
             # Build report from DB record so completed tasks return real data
             report_dict = AnalysisReport(
                 meta=ReportMeta(
                     id=record.id,
                     query_id=task_id,
                     stock_code=record.code,
-                    stock_name=record.name,
+                    stock_name=stock_name,
                     report_type=getattr(record, 'report_type', None),
+                    report_language=report_language,
                     created_at=record.created_at.isoformat() if record.created_at else None,
                     model_used=model_used,
                 ),
@@ -537,7 +633,7 @@ def get_analysis_status(task_id: str) -> TaskStatus:
                 result=AnalysisResultResponse(
                     query_id=task_id,
                     stock_code=record.code,
-                    stock_name=record.name,
+                    stock_name=stock_name,
                     report=report_dict,
                     created_at=record.created_at.isoformat() if record.created_at else datetime.now().isoformat()
                 ),
@@ -625,12 +721,23 @@ def _build_analysis_report(
     summary_data = report_data.get("summary", {})
     strategy_data = report_data.get("strategy", {})
     details_data = report_data.get("details", {})
+    report_language = normalize_report_language(
+        meta_data.get("report_language")
+        or (context_snapshot or {}).get("report_language")
+        or getattr(Config.get_instance(), "report_language", "zh")
+    )
+    localized_stock_name = get_localized_stock_name(
+        meta_data.get("stock_name", stock_name),
+        meta_data.get("stock_code", stock_code),
+        report_language,
+    )
 
     meta = ReportMeta(
         query_id=meta_data.get("query_id", query_id),
         stock_code=meta_data.get("stock_code", stock_code),
-        stock_name=meta_data.get("stock_name", stock_name),
+        stock_name=localized_stock_name,
         report_type=meta_data.get("report_type", "detailed"),
+        report_language=report_language,
         created_at=meta_data.get("created_at", datetime.now().isoformat()),
         current_price=meta_data.get("current_price"),
         change_pct=meta_data.get("change_pct"),

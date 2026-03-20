@@ -5,7 +5,6 @@ Ensures every notification channel that has a sender implementation also
 has its config keys registered in _FIELD_DEFINITIONS so the Web settings
 page and /api/v1/system/config/schema can expose them.
 """
-
 import unittest
 
 from src.core.config_registry import (
@@ -25,8 +24,7 @@ class TestSlackFieldsRegistered(unittest.TestCase):
             field = get_field_definition(key)
             self.assertEqual(field["category"], "notification", f"{key} category")
             self.assertNotEqual(
-                field["display_order"],
-                9000,
+                field["display_order"], 9000,
                 f"{key} should be explicitly registered, not inferred",
             )
 
@@ -51,8 +49,6 @@ class TestSlackFieldsRegistered(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(notification_cat, "notification category missing")
-        if notification_cat is None:
-            return
         field_keys = {f["key"] for f in notification_cat["fields"]}
         for key in self._SLACK_KEYS:
             self.assertIn(key, field_keys, f"{key} missing from schema response")
@@ -62,12 +58,10 @@ class TestSlackFieldsRegistered(unittest.TestCase):
         pushover = get_field_definition("PUSHOVER_USER_KEY")
         for key in self._SLACK_KEYS:
             order = get_field_definition(key)["display_order"]
-            self.assertGreater(
-                order, discord["display_order"], f"{key} should appear after Discord"
-            )
-            self.assertLess(
-                order, pushover["display_order"], f"{key} should appear before Pushover"
-            )
+            self.assertGreater(order, discord["display_order"],
+                               f"{key} should appear after Discord")
+            self.assertLess(order, pushover["display_order"],
+                            f"{key} should appear before Pushover")
 
 
 class TestSensitiveFieldsUsePasswordControl(unittest.TestCase):
@@ -81,11 +75,8 @@ class TestSensitiveFieldsUsePasswordControl(unittest.TestCase):
             for field in cat["fields"]:
                 if field.get("is_sensitive") and field.get("ui_control") != "password":
                     violations.append(field["key"])
-        self.assertEqual(
-            violations,
-            [],
-            f"Sensitive fields with non-password ui_control: {violations}",
-        )
+        self.assertEqual(violations, [],
+                         f"Sensitive fields with non-password ui_control: {violations}")
 
 
 class RecommendationConfigRegistryTestCase(unittest.TestCase):
@@ -93,7 +84,7 @@ class RecommendationConfigRegistryTestCase(unittest.TestCase):
         category_map = {item["category"]: item for item in get_category_definitions()}
 
         self.assertIn("recommendation", category_map)
-        self.assertEqual(category_map["recommendation"]["title"], "推荐选股")
+        self.assertEqual(category_map["recommendation"]["title"], "????")
         self.assertEqual(
             category_map["recommendation"]["description"],
             "Stock recommendation scoring weights and parameters",

@@ -83,7 +83,7 @@ const SettingsPage: React.FC = () => {
     const sent = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_SENTIMENT') || 0);
     const macro = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_MACRO') || 0);
     const risk = Number(recommendationItemMap.get('RECOMMEND_WEIGHT_RISK') || 0);
-    
+
     recommendationSum = tech + fund + sent + macro + risk;
     if (Number.isNaN(recommendationSum) || recommendationSum !== 100) {
       hasRecommendationWeightError = true;

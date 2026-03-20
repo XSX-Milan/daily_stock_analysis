@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.recommendation import (
+    RecommendationHistoryDeleteRequest,
     RecommendationHistoryFiltersResponse,
+    RecommendationHistoryItemResponse,
     RecommendationHistoryListResponse,
     HotSectorItemResponse,
     HotSectorListResponse,
@@ -315,7 +317,7 @@ def get_recommendation_history_list(
         )
         total = service.recommendation_repo.get_count(region=market)
         return RecommendationHistoryListResponse(
-            items=items,
+            items=[RecommendationHistoryItemResponse(**item) for item in items],
             total=total,
             filters=RecommendationHistoryFiltersResponse(
                 market=market,
@@ -335,24 +337,26 @@ def get_recommendation_history_list(
 
 
 @router.delete(
-    "/history/{stock_code}",
+    "/history",
     responses={
         200: {"description": "Recommendation history deleted"},
         500: {"description": "Internal server error", "model": ErrorResponse},
     },
-    summary="Delete recommendation history by stock",
+    summary="Delete recommendation history by record IDs",
 )
-def delete_recommendation_history_by_stock(
-    stock_code: str,
+def delete_recommendation_history(
+    request: RecommendationHistoryDeleteRequest = Body(
+        default_factory=RecommendationHistoryDeleteRequest
+    ),
     service: RecommendationService = Depends(get_recommendation_service),
 ) -> dict[str, int | str]:
     try:
-        deleted = service.recommendation_repo.delete_by_stock(stock_code)
+        deleted = service.recommendation_repo.delete_by_ids(request.record_ids)
         return {"status": "ok", "deleted": deleted}
     except Exception as exc:
         logger.error(
-            "Failed to delete recommendation history for %s: %s",
-            stock_code,
+            "Failed to delete recommendation history for record_ids=%s: %s",
+            request.record_ids,
             exc,
             exc_info=True,
         )

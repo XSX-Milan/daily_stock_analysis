@@ -44,16 +44,24 @@ export interface RecommendationHistoryParams {
 }
 
 export interface RecommendationHistoryItem {
+  id?: number;
+  queryId?: string | null;
   code?: string;
   name?: string;
   sector?: string | null;
   compositeScore?: number;
   priority?: string;
   recommendationDate?: string;
+  updatedAt?: string | null;
   aiSummary?: string | null;
   region?: MarketRegion | string;
   market?: MarketRegion | string;
   [key: string]: unknown;
+}
+
+export interface RecommendationHistoryDeleteResponse {
+  status: string;
+  deleted: number;
 }
 
 export interface RecommendationHistoryResponse {
@@ -218,8 +226,11 @@ export const getHistory = async (params: RecommendationHistoryParams = {}): Prom
   return normalizeRecommendationHistoryResponse(response.data);
 };
 
-export const deleteHistory = async (code: string): Promise<void> => {
-  await apiClient.delete(`/api/v1/recommendation/history/${encodeURIComponent(code)}`);
+export const deleteHistoryByIds = async (recordIds: number[]): Promise<RecommendationHistoryDeleteResponse> => {
+  const response = await apiClient.delete<Record<string, unknown>>('/api/v1/recommendation/history', {
+    data: { record_ids: recordIds },
+  });
+  return toCamelCase<RecommendationHistoryDeleteResponse>(response.data);
 };
 
 export const getWatchlist = async (): Promise<WatchlistItem[]> => {
@@ -251,7 +262,7 @@ export const recommendationApi = {
   refreshRecommendations,
   getHotSectors,
   getHistory,
-  deleteHistory,
+  deleteHistoryByIds,
   getSummary,
   getWatchlist,
   addToWatchlist,

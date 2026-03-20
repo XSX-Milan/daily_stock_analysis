@@ -31,10 +31,20 @@ class RecommendationRepository:
         """Persist one recommendation by delegating to batch save."""
         self.save_batch([rec])
 
-    def save_batch(self, recs: list[StockRecommendation]) -> None:
+    @staticmethod
+    def build_history_query_id(
+        code: str, recommendation_date: date, record_id: int
+    ) -> str:
+        return f"rec_{str(code).strip()}_{recommendation_date.strftime('%Y%m%d')}_{int(record_id)}"
+
+    def save_batch(
+        self, recs: list[StockRecommendation]
+    ) -> dict[tuple[str, date], int]:
         """Upsert a batch of recommendations for their recommendation dates."""
         if not recs:
-            return
+            return {}
+
+        saved_record_ids: dict[tuple[str, date], int] = {}
 
         with self.db.session_scope() as session:
             for rec in recs:
@@ -48,10 +58,16 @@ class RecommendationRepository:
 
                 payload = self._to_record_payload(rec)
                 if existing is None:
-                    session.add(RecommendationRecord(**payload))
+                    existing = RecommendationRecord(**payload)
+                    session.add(existing)
                 else:
                     for key, value in payload.items():
                         setattr(existing, key, value)
+
+                session.flush()
+                saved_record_ids[(rec.code, record_date)] = int(cast(int, existing.id))
+
+        return saved_record_ids
 
     def get_latest(self, code: str) -> StockRecommendation | None:
         """Return the latest recommendation for one stock code."""
@@ -126,9 +142,19 @@ class RecommendationRepository:
             items: list[dict[str, Any]] = []
             for record in records:
                 recommendation_date = cast(date | None, record.recommendation_date)
+                updated_at = cast(datetime | None, record.updated_at)
                 region = str(cast(str, record.region))
+                query_id = None
+                if recommendation_date is not None and record.id is not None:
+                    query_id = self.build_history_query_id(
+                        cast(str, record.code),
+                        recommendation_date,
+                        int(cast(int, record.id)),
+                    )
                 items.append(
                     {
+                        "id": int(cast(int, record.id)),
+                        "query_id": query_id,
                         "code": cast(str, record.code),
                         "name": cast(str, record.name),
                         "sector": cast(str | None, record.sector),
@@ -137,6 +163,7 @@ class RecommendationRepository:
                         "recommendation_date": recommendation_date.isoformat()
                         if recommendation_date
                         else None,
+                        "updated_at": updated_at.isoformat() if updated_at else None,
                         "ai_summary": cast(str | None, record.ai_summary),
                         "region": region,
                         "market": region,
@@ -186,6 +213,23 @@ class RecommendationRepository:
             result = session.execute(
                 delete(RecommendationRecord).where(
                     RecommendationRecord.code == normalized_code
+                )
+            )
+            deleted_count = getattr(result, "rowcount", 0) or 0
+
+        return int(deleted_count)
+
+    def delete_by_ids(self, record_ids: list[int]) -> int:
+        normalized_ids = sorted(
+            {int(record_id) for record_id in record_ids if int(record_id) > 0}
+        )
+        if not normalized_ids:
+            return 0
+
+        with self.db.session_scope() as session:
+            result = session.execute(
+                delete(RecommendationRecord).where(
+                    RecommendationRecord.id.in_(normalized_ids)
                 )
             )
             deleted_count = getattr(result, "rowcount", 0) or 0

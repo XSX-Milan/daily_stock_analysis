@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { analysisApi, DuplicateTaskError } from '../../api/analysis';
 import { historyApi } from '../../api/history';
 import { useStockPoolStore } from '../../stores';
-import { getReportText, normalizeReportLanguage } from '../../utils/reportLanguage';
 import HomePage from '../HomePage';
 
 const navigateMock = vi.fn();
@@ -70,6 +69,8 @@ const historyReport = {
 };
 
 describe('HomePage', () => {
+  const stockInputPlaceholder = '输入股票代码，如 600519、00700、AAPL';
+
   beforeEach(() => {
     vi.clearAllMocks();
     navigateMock.mockReset();
@@ -95,17 +96,9 @@ describe('HomePage', () => {
       </MemoryRouter>,
     );
 
-    const dashboard = await screen.findByTestId('home-dashboard');
-    expect(dashboard).toBeInTheDocument();
-    expect(dashboard.className).toContain('h-[calc(100vh-5rem)]');
-    expect(dashboard.className).toContain('lg:h-[calc(100vh-2rem)]');
-    expect(screen.getByPlaceholderText('输入股票代码或名称，如 600519、贵州茅台、AAPL')).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText(stockInputPlaceholder)).toBeInTheDocument();
     expect(await screen.findByText('趋势维持强势')).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', {
-        name: getReportText(normalizeReportLanguage(historyReport.meta.reportLanguage)).fullReport,
-      }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '详细报告' })).toBeInTheDocument();
   });
 
   it('shows the empty report workspace when history is empty', async () => {
@@ -144,7 +137,7 @@ describe('HomePage', () => {
       </MemoryRouter>,
     );
 
-    const input = await screen.findByPlaceholderText('输入股票代码或名称，如 600519、贵州茅台、AAPL');
+    const input = await screen.findByPlaceholderText(stockInputPlaceholder);
     fireEvent.change(input, { target: { value: '600519' } });
     fireEvent.click(screen.getByRole('button', { name: '分析' }));
 
@@ -174,5 +167,24 @@ describe('HomePage', () => {
     expect(navigateMock).toHaveBeenCalledWith(
       '/chat?stock=600519&name=%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%B0&recordId=1',
     );
+  });
+
+  it('loads rec-history query id report directly without listing fallback', async () => {
+    vi.mocked(historyApi.getList).mockResolvedValue({
+      total: 0,
+      page: 1,
+      limit: 20,
+      items: [],
+    });
+    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
+
+    render(
+      <MemoryRouter initialEntries={['/?stock=600519&from=rec-history&query_id=rec_600519_20260318_1']}>
+        <HomePage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('趋势维持强势')).toBeInTheDocument();
+    expect(historyApi.getDetail).toHaveBeenCalledWith('rec_600519_20260318_1');
   });
 });

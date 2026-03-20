@@ -350,6 +350,17 @@ const HomePage: React.FC = () => {
 
     const resolveByCacheOrAnalyze = async () => {
       const { valid, normalized } = validateStockCode(stockFromUrl);
+
+      if (fromParam === 'rec-history' && queryIdParam) {
+        try {
+          const report = await historyApi.getDetail(queryIdParam);
+          setStoreError(null);
+          setSelectedReport(report);
+          return;
+        } catch (err) {
+          console.error('Failed to resolve recommendation history report for query_id:', queryIdParam, err);
+        }
+      }
       
       if (fromParam === 'rec' && queryIdParam) {
         try {

@@ -272,17 +272,21 @@ class TestRecommendationRepository(unittest.TestCase):
         self.assertEqual(
             set(first.keys()),
             {
+                "id",
+                "query_id",
                 "code",
                 "name",
                 "sector",
                 "composite_score",
                 "priority",
                 "recommendation_date",
+                "updated_at",
                 "ai_summary",
                 "region",
                 "market",
             },
         )
+        self.assertEqual(first["query_id"], f"rec_AAPL_20260313_{first['id']}")
         self.assertEqual(first["region"], "US")
         self.assertEqual(first["market"], "US")
         self.assertEqual(first["recommendation_date"], "2026-03-13")
@@ -336,6 +340,43 @@ class TestRecommendationRepository(unittest.TestCase):
         self.assertIsNotNone(self.repo.get_latest("AAPL"))
 
         self.assertEqual(self.repo.delete_by_stock(""), 0)
+
+    def test_delete_by_ids_removes_only_requested_rows(self) -> None:
+        base_time = datetime(2026, 3, 13, 9, 0, 0)
+        self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=82.0,
+                    updated_at=base_time,
+                ),
+                build_recommendation(
+                    "AAPL",
+                    name="Apple",
+                    region=MarketRegion.US,
+                    sector="Technology",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=74.0,
+                    updated_at=base_time,
+                ),
+            ]
+        )
+
+        items = self.repo.get_history_list(limit=10, offset=0)
+        target_id = next(item["id"] for item in items if item["code"] == "600519")
+
+        deleted = self.repo.delete_by_ids([target_id])
+        self.assertEqual(deleted, 1)
+
+        remaining_codes = [
+            item["code"] for item in self.repo.get_history_list(limit=10, offset=0)
+        ]
+        self.assertEqual(remaining_codes, ["AAPL"])
+        self.assertEqual(self.repo.delete_by_ids([]), 0)
 
 
 if __name__ == "__main__":

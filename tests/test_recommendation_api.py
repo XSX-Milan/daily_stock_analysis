@@ -139,23 +139,29 @@ class FakeRecommendationRepo:
         self.last_count_region: str | None = None
         self.history_rows: list[dict[str, object]] = [
             {
+                "id": 1,
+                "query_id": "rec_600519_20260319_1",
                 "code": "600519",
                 "name": "Name-600519",
                 "sector": "Consumer",
                 "composite_score": 77.5,
                 "priority": "POSITION",
                 "recommendation_date": "2026-03-19",
+                "updated_at": "2026-03-19T10:00:00",
                 "ai_summary": "稳健趋势",
                 "region": "CN",
                 "market": "CN",
             },
             {
+                "id": 2,
+                "query_id": "rec_AAPL_20260318_2",
                 "code": "AAPL",
                 "name": "Name-AAPL",
                 "sector": "Tech",
                 "composite_score": 86.0,
                 "priority": "BUY_NOW",
                 "recommendation_date": "2026-03-18",
+                "updated_at": "2026-03-18T10:00:00",
                 "ai_summary": "动量延续",
                 "region": "US",
                 "market": "US",
@@ -192,6 +198,18 @@ class FakeRecommendationRepo:
             row
             for row in self.history_rows
             if str(row.get("code", "")) != normalized_code
+        ]
+        return before - len(self.history_rows)
+
+    def delete_by_ids(self, record_ids: list[int]) -> int:
+        normalized_ids = {
+            int(record_id) for record_id in record_ids if int(record_id) > 0
+        }
+        before = len(self.history_rows)
+        self.history_rows = [
+            row
+            for row in self.history_rows
+            if int(str(row.get("id", 0) or 0)) not in normalized_ids
         ]
         return before - len(self.history_rows)
 
@@ -438,6 +456,7 @@ class RecommendationApiTestCase(unittest.TestCase):
         page_one_rows = page_one_payload["items"]
         self.assertEqual(len(page_one_rows), 1)
         self.assertEqual(page_one_rows[0]["code"], "600519")
+        self.assertEqual(page_one_rows[0]["query_id"], "rec_600519_20260319_1")
         self.assertEqual(page_one_payload["total"], 2)
         self.assertEqual(
             page_one_payload["filters"], {"market": None, "limit": 1, "offset": 0}
@@ -487,20 +506,28 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertEqual(self.fake_service.recommendation_repo.last_history_offset, 0)
         self.assertEqual(self.fake_service.recommendation_repo.last_count_region, "CN")
 
-        delete_response = self.client.delete("/api/v1/recommendation/history/600519")
+        delete_response = self.client.request(
+            "DELETE",
+            "/api/v1/recommendation/history",
+            json={"record_ids": [1]},
+        )
         self.assertEqual(delete_response.status_code, 200)
         delete_payload = delete_response.json()
         self.assertEqual(delete_payload["status"], "ok")
         self.assertEqual(delete_payload["deleted"], 1)
 
-        missing_delete_response = self.client.delete(
-            "/api/v1/recommendation/history/NOT_FOUND"
+        missing_delete_response = self.client.request(
+            "DELETE",
+            "/api/v1/recommendation/history",
+            json={"record_ids": [999]},
         )
         self.assertEqual(missing_delete_response.status_code, 200)
         self.assertEqual(missing_delete_response.json()["deleted"], 0)
 
-        blank_delete_response = self.client.delete(
-            "/api/v1/recommendation/history/%20%20"
+        blank_delete_response = self.client.request(
+            "DELETE",
+            "/api/v1/recommendation/history",
+            json={"record_ids": []},
         )
         self.assertEqual(blank_delete_response.status_code, 200)
         self.assertEqual(blank_delete_response.json()["deleted"], 0)

@@ -937,7 +937,10 @@ class RecommendationServiceTestCase(unittest.TestCase):
     ) -> None:
         config = SimpleNamespace(max_workers=2)
         service = build_fast_service(config)
-        service.recommendation_repo.save_batch = Mock()
+        recommendation_date = datetime.utcnow().date()
+        service.recommendation_repo.save_batch = Mock(
+            return_value={("600519", recommendation_date): 42}
+        )
         service._build_stock_payload = Mock(
             return_value={
                 "code": "600519",
@@ -977,8 +980,10 @@ class RecommendationServiceTestCase(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
         row = rows[0]
-        self.assertTrue(row.query_id.startswith("rec_600519_"))
-        self.assertEqual(len(row.query_id.rsplit("_", maxsplit=1)[-1]), 8)
+        self.assertEqual(
+            row.query_id,
+            f"rec_600519_{recommendation_date.strftime('%Y%m%d')}_42",
+        )
         self.assertEqual(row.sentiment_score, 67)
         self.assertEqual(row.operation_advice, "强烈买入")
         self.assertEqual(row.trend_prediction, "看多")

@@ -1,6 +1,7 @@
 import type React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import type { RecommendationHistoryItem } from '../api/recommendation';
 import { Select } from '../components/common/Select';
 import {
   RecommendationHeader,
@@ -56,22 +57,78 @@ const RecommendPage: React.FC = () => {
     triggerRefresh,
     setFilter,
     fetchHistory,
-    deleteHistoryStock,
+    deleteHistoryByIds,
   } = useRecommendationStore();
   
   const [viewMode, setViewMode] = useState<'live' | 'history'>('live');
   const [selectedSector, setSelectedSector] = useState<string | null>(null);
   const [smartRecommendAttempted, setSmartRecommendAttempted] = useState(false);
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     void Promise.all([fetchRecommendations(), fetchSummary()]);
   }, [fetchRecommendations, fetchSummary]);
 
+  useEffect(() => {
+    setSelectedHistoryIds((previous) => {
+      const visibleIds = new Set(
+        historyList
+          .map((item) => Number(item.id))
+          .filter((id) => Number.isInteger(id) && id > 0),
+      );
+      return new Set(Array.from(previous).filter((id) => visibleIds.has(id)));
+    });
+  }, [historyList]);
+
   const handleViewModeChange = (mode: 'live' | 'history') => {
     setViewMode(mode);
     if (mode === 'history') {
+      setSelectedHistoryIds(new Set());
       void fetchHistory(historyMarket, historyLimit, 0);
     }
+  };
+
+  const handleHistoryOpenDetail = (item: RecommendationHistoryItem) => {
+    if (!item.code || !item.queryId) return;
+    navigate(`/?stock=${encodeURIComponent(item.code)}&from=rec-history&query_id=${encodeURIComponent(item.queryId)}`);
+  };
+
+  const handleToggleHistorySelection = (recordId: number) => {
+    setSelectedHistoryIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(recordId)) {
+        next.delete(recordId);
+      } else {
+        next.add(recordId);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleSelectAllHistory = () => {
+    const visibleIds = historyList
+      .map((item) => Number(item.id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedHistoryIds.has(id));
+
+    setSelectedHistoryIds((previous) => {
+      const next = new Set(previous);
+      if (allSelected) {
+        visibleIds.forEach((id) => next.delete(id));
+      } else {
+        visibleIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteHistoryIds = async (recordIds: number[]) => {
+    await deleteHistoryByIds(recordIds, historyMarket, historyLimit, historyOffset);
+    setSelectedHistoryIds((previous) => {
+      const next = new Set(previous);
+      recordIds.forEach((id) => next.delete(id));
+      return next;
+    });
   };
 
   const selectedMarket = normalizeMarket(filters.market ?? filters.region);
@@ -309,18 +366,28 @@ const RecommendPage: React.FC = () => {
           <RecommendationHistory
             items={historyList}
             loading={loading}
+            deleting={loading}
             total={historyTotal}
             limit={historyLimit}
             offset={historyOffset}
             market={historyMarket}
+            selectedIds={selectedHistoryIds}
             onMarketChange={(market) => {
+              setSelectedHistoryIds(new Set());
               void fetchHistory(market, historyLimit, 0);
             }}
             onPageChange={(offset) => {
+              setSelectedHistoryIds(new Set());
               void fetchHistory(historyMarket, historyLimit, offset);
             }}
-            onDelete={async (code) => {
-              await deleteHistoryStock(code, historyMarket, historyLimit, historyOffset);
+            onOpenDetail={handleHistoryOpenDetail}
+            onToggleItemSelection={handleToggleHistorySelection}
+            onToggleSelectAll={handleToggleSelectAllHistory}
+            onDeleteItem={async (recordId) => {
+              await handleDeleteHistoryIds([recordId]);
+            }}
+            onDeleteSelected={async () => {
+              await handleDeleteHistoryIds(Array.from(selectedHistoryIds));
             }}
           />
         )}

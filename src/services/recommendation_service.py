@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -17,6 +17,7 @@ from data_provider.realtime_types import UnifiedRealtimeQuote
 from src.analyzer import GeminiAnalyzer
 from src.config import Config, get_config, setup_env
 from src.core.config_manager import ConfigManager
+from src.repositories.recommendation_repo import RecommendationRepository
 from src.recommendation.constants import (
     CN_STOP_LOSS_RATIO,
     CN_TAKE_PROFIT_RATIO,
@@ -700,9 +701,14 @@ class RecommendationService:
         merged_recommendations = self._sort_recommendations(
             ordered_items, deduplicated_codes
         )
-        self.recommendation_repo.save_batch(sorted_new_recommendations)
+        saved_record_ids = self.recommendation_repo.save_batch(
+            sorted_new_recommendations
+        )
         try:
-            self._bridge_recommendations_to_analysis_history(sorted_new_recommendations)
+            self._bridge_recommendations_to_analysis_history(
+                sorted_new_recommendations,
+                saved_record_ids,
+            )
         except Exception as exc:
             logger.warning(
                 "Failed to bridge recommendation refresh into analysis_history: %s",
@@ -713,16 +719,26 @@ class RecommendationService:
     def _bridge_recommendations_to_analysis_history(
         self,
         recommendations: list[StockRecommendation],
+        saved_record_ids: dict[tuple[str, date], int] | None = None,
     ) -> None:
         if not recommendations:
             return
 
-        query_date = datetime.utcnow().strftime("%Y%m%d")
+        saved_record_ids = saved_record_ids or {}
         records: list[AnalysisHistory] = []
 
         for recommendation in recommendations:
             bridge_result = self._build_analysis_bridge_result(recommendation)
-            query_id = f"rec_{recommendation.code}_{query_date}"
+            recommendation_date = recommendation.updated_at.date()
+            record_id = saved_record_ids.get((recommendation.code, recommendation_date))
+            if record_id is not None:
+                query_id = RecommendationRepository.build_history_query_id(
+                    recommendation.code,
+                    recommendation_date,
+                    record_id,
+                )
+            else:
+                query_id = f"rec_{recommendation.code}_{recommendation_date.strftime('%Y%m%d')}"
             sniper_points = self.db_manager._extract_sniper_points(bridge_result)
             raw_result = self.db_manager._build_raw_result(bridge_result)
 

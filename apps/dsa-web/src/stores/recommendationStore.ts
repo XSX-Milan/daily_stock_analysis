@@ -31,7 +31,7 @@ interface RecommendationActions {
   fetchRecommendations: (filters?: RecommendationFilters) => Promise<void>;
   fetchHotSectors: (market: string) => Promise<void>;
   fetchHistory: (market?: string, limit?: number, offset?: number) => Promise<void>;
-  deleteHistoryStock: (code: string, market?: string, limit?: number, offset?: number) => Promise<void>;
+  deleteHistoryByIds: (recordIds: number[], market?: string, limit?: number, offset?: number) => Promise<void>;
   fetchSummary: () => Promise<void>;
   triggerRefresh: (request: RecommendationStoreRefreshRequest) => Promise<void>;
   setFilter: (key: keyof RecommendationFilters, value?: string) => void;
@@ -104,28 +104,62 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
     }
   },
 
-  deleteHistoryStock: async (code, market, limit, offset) => {
-    const normalizedCode = String(code ?? '').trim();
-    if (!normalizedCode) {
-      set({ error: '股票代码不能为空。' });
+  deleteHistoryByIds: async (recordIds, market, limit, offset) => {
+    const normalizedIds = Array.from(
+      new Set(recordIds.map((recordId) => Number(recordId)).filter((recordId) => Number.isInteger(recordId) && recordId > 0)),
+    );
+    if (normalizedIds.length === 0) {
+      set({ error: '请选择至少一条推荐记录。' });
       return;
     }
 
-    set({ loading: true, error: null });
+    const previousState = get();
+    const nextMarket = String(market ?? previousState.historyMarket ?? '').trim().toUpperCase();
+    const nextLimit = limit ?? previousState.historyLimit;
+    const nextOffset = offset ?? previousState.historyOffset;
+    const idSet = new Set(normalizedIds);
+    const nextHistoryList = previousState.historyList.filter((item) => !idSet.has(Number(item.id)));
+    const removedVisibleCount = previousState.historyList.length - nextHistoryList.length;
+
+    set({
+      historyList: nextHistoryList,
+      historyTotal: Math.max(0, previousState.historyTotal - removedVisibleCount),
+      historyLimit: nextLimit,
+      historyOffset: nextOffset,
+      historyMarket: nextMarket || undefined,
+      loading: true,
+      error: null,
+    });
+
     try {
-      await recommendationApi.deleteHistory(normalizedCode);
-      const state = get();
-      const nextMarket = String(market ?? state.historyMarket ?? '').trim().toUpperCase();
-      const nextLimit = limit ?? state.historyLimit;
-      const nextOffset = offset ?? state.historyOffset;
-      const response = await recommendationApi.getHistory({
-        market: nextMarket || undefined,
-        limit: nextLimit,
-        offset: nextOffset,
-      });
+      const response = await recommendationApi.deleteHistoryByIds(normalizedIds);
+      const shouldRefetchPage =
+        response.deleted !== normalizedIds.length
+        || (nextHistoryList.length === 0 && Math.max(0, previousState.historyTotal - response.deleted) > 0);
+
+      if (shouldRefetchPage) {
+        const fallbackOffset = nextHistoryList.length === 0 && nextOffset > 0
+          ? Math.max(0, nextOffset - nextLimit)
+          : nextOffset;
+        const refreshed = await recommendationApi.getHistory({
+          market: nextMarket || undefined,
+          limit: nextLimit,
+          offset: fallbackOffset,
+        });
+        set({
+          historyList: refreshed.items,
+          historyTotal: refreshed.total,
+          historyLimit: nextLimit,
+          historyOffset: fallbackOffset,
+          historyMarket: nextMarket || undefined,
+          loading: false,
+          error: null,
+        });
+        return;
+      }
+
       set({
-        historyList: response.items,
-        historyTotal: response.total,
+        historyTotal: Math.max(0, previousState.historyTotal - response.deleted),
         historyLimit: nextLimit,
         historyOffset: nextOffset,
         historyMarket: nextMarket || undefined,
@@ -133,7 +167,15 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
         error: null,
       });
     } catch (error: unknown) {
-      set({ loading: false, error: getParsedApiError(error).message });
+      set({
+        historyList: previousState.historyList,
+        historyTotal: previousState.historyTotal,
+        historyLimit: previousState.historyLimit,
+        historyOffset: previousState.historyOffset,
+        historyMarket: previousState.historyMarket,
+        loading: false,
+        error: getParsedApiError(error).message,
+      });
     }
   },
 

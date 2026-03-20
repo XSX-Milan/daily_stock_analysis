@@ -50,10 +50,33 @@ class RecommendationHistoryFiltersResponse(BaseModel):
     offset: int = Field(..., ge=0, description="Offset")
 
 
+class RecommendationHistoryItemResponse(BaseModel):
+    id: int = Field(..., ge=1, description="Recommendation record ID")
+    query_id: str | None = Field(None, description="Linked analysis history query ID")
+    code: str = Field(..., description="Stock code")
+    name: str = Field(..., description="Stock name")
+    sector: str | None = Field(None, description="Sector name")
+    composite_score: float = Field(..., description="Composite score")
+    priority: str = Field(..., description="Recommendation priority")
+    recommendation_date: str | None = Field(None, description="Recommendation date")
+    updated_at: str | None = Field(None, description="Recommendation update timestamp")
+    ai_summary: str | None = Field(
+        None, description="Optional AI recommendation summary"
+    )
+    region: str = Field(..., description="Market region code")
+    market: str = Field(..., description="Legacy alias for market region code")
+
+
 class RecommendationHistoryListResponse(BaseModel):
-    items: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[RecommendationHistoryItemResponse] = Field(default_factory=list)
     total: int = Field(..., ge=0)
     filters: RecommendationHistoryFiltersResponse
+
+
+class RecommendationHistoryDeleteRequest(BaseModel):
+    record_ids: list[int] = Field(
+        default_factory=list, description="Recommendation record IDs to delete"
+    )
 
 
 class PrioritySummaryResponse(BaseModel):

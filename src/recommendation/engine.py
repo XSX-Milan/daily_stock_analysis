@@ -10,8 +10,7 @@ from typing import Any, Mapping
 
 from data_provider.realtime_types import UnifiedRealtimeQuote
 from src.agent.agents.base_agent import BaseAgent
-from src.agent.agents.recommendation_agent import RecommendationAgent
-from src.agent.factory import get_tool_registry
+from src.agent.factory import build_recommendation_agent
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.protocols import (
     AgentContext,
@@ -76,14 +75,37 @@ class ScoringEngine:
         ai_refiner: Any | None = None,
         agents: Mapping[str, BaseAgent] | None = None,
         llm_adapter: LLMToolAdapter | None = None,
+        config: Any | None = None,
+        skills: list[str] | None = None,
         batch_max_workers: int = 4,
     ) -> None:
         self._weights = weights
         _ = scorers
         self._ai_refiner = ai_refiner
         self._llm_adapter = llm_adapter or LLMToolAdapter()
+        self._config = self._normalize_recommendation_config(config)
+        self._skills = list(skills) if skills is not None else None
         self._batch_max_workers = max(1, int(batch_max_workers))
         self._agents = self._build_agents(agents)
+
+    @staticmethod
+    def _normalize_recommendation_config(config: Any | None) -> Any | None:
+        if config is None:
+            return None
+        if getattr(config, "agent_skill_dir", None):
+            return config
+
+        legacy_skill_dir = getattr(config, "agent_strategy_dir", None)
+        if not legacy_skill_dir:
+            return config
+
+        try:
+            setattr(config, "agent_skill_dir", legacy_skill_dir)
+        except Exception:
+            logger.debug(
+                "Failed to map agent_strategy_dir to agent_skill_dir for recommendation config",
+            )
+        return config
 
     def score_stock(self, code: str, data: StockScoringData) -> CompositeScore:
         """Score one stock and return its composite recommendation result."""
@@ -202,21 +224,32 @@ class ScoringEngine:
         if agents is not None:
             return dict(agents)
 
-        registry = get_tool_registry()
         return {
-            "technical": RecommendationAgent(
-                registry, self._llm_adapter, dimension="technical"
+            "technical": build_recommendation_agent(
+                config=self._config,
+                dimension="technical",
+                skills=self._skills,
             ),
-            "fundamental": RecommendationAgent(
-                registry, self._llm_adapter, dimension="fundamental"
+            "fundamental": build_recommendation_agent(
+                config=self._config,
+                dimension="fundamental",
+                skills=self._skills,
             ),
-            "sentiment": RecommendationAgent(
-                registry, self._llm_adapter, dimension="sentiment"
+            "sentiment": build_recommendation_agent(
+                config=self._config,
+                dimension="sentiment",
+                skills=self._skills,
             ),
-            "macro": RecommendationAgent(
-                registry, self._llm_adapter, dimension="macro"
+            "macro": build_recommendation_agent(
+                config=self._config,
+                dimension="macro",
+                skills=self._skills,
             ),
-            "risk": RecommendationAgent(registry, self._llm_adapter, dimension="risk"),
+            "risk": build_recommendation_agent(
+                config=self._config,
+                dimension="risk",
+                skills=self._skills,
+            ),
         }
 
     def _score_dimension(

@@ -162,6 +162,7 @@ class RecommendationService:
         self.scoring_engine = ScoringEngine(
             weights=weights,
             ai_refiner=self.gemini_analyzer,
+            config=self.config,
             batch_max_workers=self.max_workers,
         )
 
@@ -1139,6 +1140,7 @@ class RecommendationService:
         self.scoring_engine = ScoringEngine(
             weights=new_weights,
             ai_refiner=self.gemini_analyzer,
+            config=self.config,
             batch_max_workers=self.max_workers,
         )
         return new_weights

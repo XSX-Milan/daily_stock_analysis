@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from data_provider.realtime_types import UnifiedRealtimeQuote
@@ -53,28 +54,68 @@ def build_composite_score(
 class RecommendationEngineTestCase(unittest.TestCase):
     _DIMENSIONS = ("technical", "fundamental", "sentiment", "macro", "risk")
 
-    @patch("src.recommendation.engine.get_tool_registry")
-    @patch("src.recommendation.engine.RecommendationAgent")
+    @patch("src.recommendation.engine.build_recommendation_agent")
     def test_init_builds_default_recommendation_agents(
         self,
-        recommendation_cls: Mock,
-        registry_fn: Mock,
+        build_recommendation_agent_fn: Mock,
     ) -> None:
-        registry_fn.return_value = Mock()
+        build_recommendation_agent_fn.side_effect = [
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+        ]
         engine = ScoringEngine(
             weights=ScoringWeights(
                 technical=20, fundamental=20, sentiment=20, macro=20, risk=20
-            )
+            ),
         )
         self.assertIsNotNone(engine)
-        self.assertEqual(recommendation_cls.call_count, 5)
+        self.assertEqual(build_recommendation_agent_fn.call_count, 5)
         called_dimensions = {
-            call.kwargs.get("dimension") for call in recommendation_cls.call_args_list
+            call.kwargs.get("dimension")
+            for call in build_recommendation_agent_fn.call_args_list
         }
         self.assertEqual(
             called_dimensions,
             {"technical", "fundamental", "sentiment", "macro", "risk"},
         )
+
+    @patch("src.recommendation.engine.build_recommendation_agent")
+    def test_init_maps_legacy_strategy_dir_to_skill_dir_for_recommendation(
+        self,
+        build_recommendation_agent_fn: Mock,
+    ) -> None:
+        build_recommendation_agent_fn.side_effect = [
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+            Mock(),
+        ]
+        config = SimpleNamespace(
+            agent_strategy_dir="/tmp/legacy-strategies",
+            agent_skill_dir=None,
+            agent_skills=None,
+        )
+
+        _ = ScoringEngine(
+            weights=ScoringWeights(
+                technical=20,
+                fundamental=20,
+                sentiment=20,
+                macro=20,
+                risk=20,
+            ),
+            config=config,
+        )
+
+        self.assertEqual(
+            getattr(config, "agent_skill_dir", None), "/tmp/legacy-strategies"
+        )
+        for call in build_recommendation_agent_fn.call_args_list:
+            self.assertIs(call.kwargs.get("config"), config)
 
     def test_score_stock_uses_agent_opinion_scores_with_weights(self) -> None:
         agents = {

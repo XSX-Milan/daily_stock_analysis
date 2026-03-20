@@ -89,9 +89,15 @@ class RecommendationAgent(BaseAgent):
         tool_registry,
         llm_adapter,
         skill_instructions: str = "",
+        technical_skill_policy: str = "",
         dimension: str = "technical",
     ):
-        super().__init__(tool_registry, llm_adapter, skill_instructions)
+        super().__init__(
+            tool_registry,
+            llm_adapter,
+            skill_instructions,
+            technical_skill_policy,
+        )
         normalized_dimension = str(dimension or "technical").strip().lower()
         self.dimension = (
             normalized_dimension
@@ -105,11 +111,14 @@ class RecommendationAgent(BaseAgent):
 
     def system_prompt(self, ctx: AgentContext) -> str:
         del ctx
-        return (
+        prompt = (
             f"You are a {self.profile['title']} recommendation specialist. "
             f"Focus on {self.profile['focus']}. "
             "Return one stable 0-100 score with clear evidence."
         )
+        if self.dimension == "technical" and self.technical_skill_policy.strip():
+            prompt = f"{prompt}\n\n{self.technical_skill_policy.strip()}"
+        return prompt
 
     def build_user_message(self, ctx: AgentContext) -> str:
         stock_label = ctx.stock_code or "UNKNOWN"
@@ -122,8 +131,14 @@ class RecommendationAgent(BaseAgent):
         del raw_text
         return None
 
-    def run(self, ctx: AgentContext, progress_callback=None) -> StageResult:
+    def run(
+        self,
+        ctx: AgentContext,
+        progress_callback=None,
+        timeout_seconds: Optional[float] = None,
+    ) -> StageResult:
         del progress_callback
+        del timeout_seconds
         result = StageResult(stage_name=self.agent_name, status=StageStatus.RUNNING)
         try:
             delegated = self._collect_delegated_opinions(ctx)
@@ -432,7 +447,10 @@ class RecommendationAgent(BaseAgent):
 
         main_agents = [
             TechnicalAgent(
-                self.tool_registry, self.llm_adapter, self.skill_instructions
+                self.tool_registry,
+                self.llm_adapter,
+                self.skill_instructions,
+                technical_skill_policy=self.technical_skill_policy,
             ),
             RiskAgent(self.tool_registry, self.llm_adapter, self.skill_instructions),
             DecisionAgent(

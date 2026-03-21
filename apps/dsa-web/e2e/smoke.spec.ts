@@ -2,7 +2,34 @@ import { expect, test, type Page } from '@playwright/test';
 
 const smokePassword = process.env.DSA_WEB_SMOKE_PASSWORD;
 
+type AuthStatus = {
+  authEnabled: boolean;
+  loggedIn: boolean;
+};
+
+async function fetchAuthStatus(page: Page): Promise<AuthStatus> {
+  const response = await page.request.get('/api/v1/auth/status');
+  expect(response.ok()).toBeTruthy();
+  return (await response.json()) as AuthStatus;
+}
+
 async function login(page: Page) {
+  const authStatus = await fetchAuthStatus(page);
+
+  if (!authStatus.authEnabled) {
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+    return;
+  }
+
+  if (authStatus.loggedIn) {
+    await page.goto('/');
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForTimeout(1000);
+    return;
+  }
+
   test.skip(!smokePassword, 'Set DSA_WEB_SMOKE_PASSWORD to run authenticated smoke tests.');
 
   // Navigate to login page
@@ -35,8 +62,17 @@ async function login(page: Page) {
 
 test.describe('web smoke', () => {
   test('login page renders password form', async ({ page }) => {
+    const authStatus = await fetchAuthStatus(page);
+
     await page.goto('/login');
     await page.waitForLoadState('domcontentloaded');
+
+    if (!authStatus.authEnabled) {
+      await page.waitForURL('/', { timeout: 15_000 });
+      await expect(page.getByTestId('home-dashboard')).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByPlaceholder('输入股票代码或名称，如 600519、贵州茅台、AAPL')).toBeVisible();
+      return;
+    }
 
     // Check for branding
     await expect(page.getByText('DAILY STOCK').first()).toBeVisible();
@@ -47,6 +83,40 @@ test.describe('web smoke', () => {
 
     // Check for submit button
     await expect(page.getByRole('button', { name: /授权进入工作台|完成设置并登录/ })).toBeVisible();
+  });
+
+  test('homepage ignores legacy recommendation deep links', async ({ page }) => {
+    await login(page);
+
+    await page.goto('/?from=rec-history&query_id=rec_600519_20260321_1');
+    await page.waitForLoadState('domcontentloaded');
+
+    await expect(page.getByTestId('home-dashboard')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByPlaceholder('输入股票代码或名称，如 600519、贵州茅台、AAPL')).toBeVisible();
+    await expect(page.getByTestId('recommendation-detail-drawer')).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe('/');
+  });
+
+  test('recommendation page loads and isolates detail viewing locally', async ({ page }) => {
+    await login(page);
+
+    await page.goto('/recommend');
+    await page.waitForLoadState('domcontentloaded');
+
+    await expect(page.getByTestId('recommend-page')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('recommendation-table')).toBeVisible({ timeout: 10_000 });
+
+    const recommendationRows = page.locator('[data-testid^="table-row-"]');
+    const rowCount = await recommendationRows.count();
+    test.skip(rowCount === 0, 'No recommendation rows available to open local detail drawer.');
+
+    await recommendationRows.first().click();
+    await expect(page.getByTestId('recommendation-detail-drawer')).toBeVisible({ timeout: 15_000 });
+    expect(new URL(page.url()).pathname).toBe('/recommend');
+
+    await page.getByRole('button', { name: '关闭抽屉' }).click();
+    await expect(page.getByTestId('recommendation-detail-drawer')).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe('/recommend');
   });
 
   test('home page shows analysis entry and history panel after login', async ({ page }) => {

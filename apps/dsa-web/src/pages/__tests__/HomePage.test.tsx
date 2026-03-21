@@ -176,14 +176,13 @@ describe('HomePage', () => {
     );
   });
 
-  it('loads recommendation history detail by query id', async () => {
+  it('does not hijack recommendation query params into homepage state', async () => {
     vi.mocked(historyApi.getList).mockResolvedValue({
       total: 0,
       page: 1,
       limit: 20,
       items: [],
     });
-    vi.mocked(historyApi.getDetail).mockResolvedValue(historyReport);
 
     render(
       <MemoryRouter initialEntries={['/?stock=600519&from=rec-history&query_id=rec_600519_20260318_1']}>
@@ -191,7 +190,7 @@ describe('HomePage', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('?????????')).toBeInTheDocument();
-    expect(historyApi.getDetail).toHaveBeenCalledWith('rec_600519_20260318_1');
+    expect(await screen.findByText('开始分析')).toBeInTheDocument();
+    expect(historyApi.getDetail).not.toHaveBeenCalled();
   });
 });

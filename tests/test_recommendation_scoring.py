@@ -114,6 +114,16 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
         agent = RecommendationAgent.__new__(RecommendationAgent)
         return agent._technical_score(ctx, trend_score=70.0, delegated=[])
 
+    def _risk_score(
+        self,
+        *,
+        trend_score: float,
+        quote_data: dict | None = None,
+    ) -> float:
+        ctx = AgentContext(data={"quote": dict(quote_data or {})})
+        agent = RecommendationAgent.__new__(RecommendationAgent)
+        return agent._risk_score(ctx, trend_score=trend_score, delegated=[])
+
     def test_shrink_volume_pullback_bonus(self) -> None:
         pullback_score = self._technical_score(
             stock_code="600519",
@@ -126,6 +136,19 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
             technical_data={"price_vs_ma10": 0.05, "ma_alignment": "mixed"},
         )
         self.assertGreaterEqual(pullback_score, baseline_score + 5.0)
+
+    def test_shrink_volume_threshold_uses_0_8_rule(self) -> None:
+        within_threshold_score = self._technical_score(
+            stock_code="600519",
+            volume_ratio=0.8,
+            technical_data={"price_vs_ma10": 0.03, "ma_alignment": "mixed"},
+        )
+        outside_threshold_score = self._technical_score(
+            stock_code="600519",
+            volume_ratio=0.81,
+            technical_data={"price_vs_ma10": 0.03, "ma_alignment": "mixed"},
+        )
+        self.assertGreaterEqual(within_threshold_score, outside_threshold_score + 3.0)
 
     def test_heavy_volume_penalty(self) -> None:
         heavy_volume_score = self._technical_score(
@@ -161,6 +184,17 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
             technical_data={"price_vs_ma20": 0.02},
         )
         self.assertGreaterEqual(counter_trend_score, neutral_score + 3.0)
+
+    def test_high_open_trap_penalty_applies_to_risk_score(self) -> None:
+        trapped_score = self._risk_score(
+            trend_score=70.0,
+            quote_data={"open_price": 108.0, "pre_close": 100.0, "turnover_rate": 2.0},
+        )
+        baseline_score = self._risk_score(
+            trend_score=70.0,
+            quote_data={"open_price": 103.0, "pre_close": 100.0, "turnover_rate": 2.0},
+        )
+        self.assertLessEqual(trapped_score, baseline_score - 6.0)
 
     def test_counter_trend_ma60_bonus(self) -> None:
         ma60_counter_trend_score = self._technical_score(
@@ -377,6 +411,7 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
 
     def test_skill_instructions_reach_delegated_agents(self) -> None:
         captured_messages: list[list[dict[str, Any]]] = []
+        captured_skill_instructions: list[str] = []
         skill_text = "Use strict risk controls before final judgment."
 
         def _delegate_cls(name: str):
@@ -400,6 +435,7 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
                     del progress_callback
                     del timeout_seconds
                     captured_messages.append(self._build_messages(ctx))
+                    captured_skill_instructions.append(str(self.skill_instructions))
                     return StageResult(
                         stage_name=name,
                         status=StageStatus.COMPLETED,
@@ -460,12 +496,18 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
 
         self.assertEqual(result.status, StageStatus.COMPLETED)
         self.assertEqual(len(captured_messages), 5)
+        self.assertEqual(len(captured_skill_instructions), 5)
+        for skill_instructions in captured_skill_instructions:
+            self.assertIn(
+                "Built-in Quant Recommendation Framework",
+                skill_instructions,
+            )
+            self.assertNotIn(skill_text, skill_instructions)
         for messages in captured_messages:
-            self.assertGreaterEqual(len(messages), 3)
-            self.assertEqual(messages[1]["role"], "system")
-            self.assertEqual(
-                messages[1]["content"],
-                f"[Skill Instructions]\n{skill_text}",
+            system_messages = [m for m in messages if m.get("role") == "system"]
+            self.assertTrue(system_messages)
+            self.assertTrue(
+                str(system_messages[0]["content"]).endswith("system prompt")
             )
 
     def test_preloaded_news_items_skip_intel_delegation(self) -> None:
@@ -644,21 +686,24 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
         )
         self.assertIn("intel", ran_agents)
 
-    def test_risk_agent_preloaded_news_keys_skip_live_search_instruction(self) -> None:
+    def test_risk_agent_always_keeps_live_search_instruction(self) -> None:
         agent = RiskAgent(Mock(), Mock())
         live_search_instruction = (
             "Search for latest news if you haven't received intel data yet."
         )
 
         message_with_news_items = agent.build_user_message(
-            AgentContext(stock_code="AAPL", data={"news_items": []})
+            AgentContext(
+                stock_code="AAPL",
+                data={"news_items": [{"title": "preloaded"}]},
+            )
         )
         message_with_news = agent.build_user_message(
-            AgentContext(stock_code="AAPL", data={"news": []})
+            AgentContext(stock_code="AAPL", data={"news": [{"title": "preloaded"}]})
         )
 
-        self.assertNotIn(live_search_instruction, message_with_news_items)
-        self.assertNotIn(live_search_instruction, message_with_news)
+        self.assertIn(live_search_instruction, message_with_news_items)
+        self.assertIn(live_search_instruction, message_with_news)
 
     def test_risk_agent_missing_preloaded_news_keeps_live_search_instruction(
         self,
@@ -705,6 +750,7 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
                 "take_profit",
                 "ai_refined",
                 "ai_summary",
+                "analysis_record_id",
                 "updated_at",
             },
         )
@@ -731,7 +777,9 @@ class RecommendationScoringRedTestCase(unittest.TestCase):
             take_profit=112.0,
             updated_at=datetime(2026, 1, 1),
         )
-        response = _to_recommendation_response(item)
+        service = Mock()
+        service.get_analysis_record_id_for_recommendation.return_value = None
+        response = _to_recommendation_response(item, service)
         self.assertEqual(response.stock_code, response.code)
         self.assertEqual(response.stock_name, response.name)
         self.assertEqual(response.region, response.market)

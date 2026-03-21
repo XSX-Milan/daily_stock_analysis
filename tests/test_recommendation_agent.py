@@ -41,21 +41,20 @@ class RecommendationAgentWiringTestCase(unittest.TestCase):
                 return_value=Mock(),
             ),
         ):
-            skill_manager = Mock()
-            skill_manager.list_skills.return_value = ["stock_recommendation"]
-            skill_manager.get_skill_instructions.return_value = "active skills"
-            get_skill_manager_mock.return_value = skill_manager
-
             agent = build_recommendation_agent(config=config, dimension="technical")
 
         self.assertIsInstance(agent, RecommendationAgent)
         self.assertTrue(agent.technical_skill_policy.strip())
-        skill_manager.activate.assert_called_once()
+        self.assertEqual(agent.skill_instructions, "")
+        get_skill_manager_mock.assert_not_called()
 
     def test_delegated_technical_agent_receives_technical_skill_policy(self) -> None:
         captured_kwargs: dict[str, object] = {}
+        captured_skill_text: dict[str, str] = {}
 
-        def build_technical(*_args, **kwargs):
+        def build_technical(*args, **kwargs):
+            if len(args) >= 3:
+                captured_skill_text["value"] = str(args[2])
             captured_kwargs.update(kwargs)
             agent = Mock()
             agent.agent_name = "technical"
@@ -105,6 +104,28 @@ class RecommendationAgentWiringTestCase(unittest.TestCase):
             _ = agent._run_main_agent_delegation(ctx)
 
         self.assertEqual(captured_kwargs.get("technical_skill_policy"), "TECH_POLICY")
+        self.assertIn(
+            "Built-in Quant Recommendation Framework",
+            captured_skill_text.get("value", ""),
+        )
+        self.assertNotIn("active skills", captured_skill_text.get("value", ""))
+
+    def test_system_prompt_contains_builtin_framework_policy(self) -> None:
+        with patch(
+            "src.agent.agents.recommendation_agent.AgentMemory.from_config",
+            return_value=Mock(),
+        ):
+            agent = RecommendationAgent(
+                tool_registry=Mock(),
+                llm_adapter=Mock(),
+                skill_instructions="legacy recommendation skill text",
+                technical_skill_policy="TECH_POLICY",
+                dimension="technical",
+            )
+
+        prompt = agent.system_prompt(AgentContext())
+        self.assertIn("Built-in Quant Recommendation Framework", prompt)
+        self.assertIn("TECH_POLICY", prompt)
 
     def test_delegated_agents_receive_timeout_budget(self) -> None:
         delegated_agents: list[Mock] = []

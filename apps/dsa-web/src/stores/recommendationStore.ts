@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { recommendationApi } from '../api/recommendation';
 import { getParsedApiError } from '../api/error';
 import type { RecommendationHistoryItem, RecommendationHotSector } from '../api/recommendation';
+import type { AnalysisReport } from '../types/analysis';
 import type {
   PrioritySummary,
   RecommendationFilters,
@@ -21,6 +22,11 @@ interface RecommendationState {
   loading: boolean;
   error: string | null;
   filters: RecommendationFilters;
+  detailOpen: boolean;
+  detailLoading: boolean;
+  detailError: string | null;
+  detailRecommendation: RecommendationHistoryItem | null;
+  detailAnalysis: AnalysisReport | null;
 }
 
 type RecommendationStoreRefreshRequest = Omit<RecommendationRefreshRequest, 'sector'> & {
@@ -34,11 +40,46 @@ interface RecommendationActions {
   deleteHistoryByIds: (recordIds: number[], market?: string, limit?: number, offset?: number) => Promise<void>;
   fetchSummary: () => Promise<void>;
   triggerRefresh: (request: RecommendationStoreRefreshRequest) => Promise<void>;
+  openHistoryDetail: (item: RecommendationHistoryItem) => Promise<void>;
+  openLiveDetail: (item: RecommendationItem) => Promise<void>;
+  closeDetail: () => void;
   setFilter: (key: keyof RecommendationFilters, value?: string) => void;
   clearFilters: () => void;
 }
 
 const DEFAULT_FILTERS: RecommendationFilters = {};
+
+const toPositiveRecordId = (value: unknown): number | null => {
+  if (typeof value !== 'number') {
+    return null;
+  }
+  return Number.isInteger(value) && value > 0 ? value : null;
+};
+
+const normalizeLiveDetailRecommendation = (item: RecommendationItem): RecommendationHistoryItem => {
+  const recommendationRecordId = toPositiveRecordId(item.recommendationRecordId);
+  const analysisRecordId = toPositiveRecordId(item.analysisRecordId);
+  return {
+    id: recommendationRecordId ?? undefined,
+    analysisRecordId,
+    code: item.stockCode,
+    name: item.stockName ?? item.name,
+    sector: item.sector ?? null,
+    compositeScore: item.compositeScore,
+    priority: item.priority,
+    updatedAt: item.updatedAt,
+    market: item.market,
+    region: item.region ?? item.market,
+    aiSummary: item.aiSummary ?? null,
+  };
+};
+
+const hasDetailRecommendation = (item: RecommendationHistoryItem | null | undefined): boolean => {
+  if (!item) {
+    return false;
+  }
+  return Boolean(item.id || item.code || item.name || item.analysisRecordId);
+};
 
 export const useRecommendationStore = create<RecommendationState & RecommendationActions>((set, get) => ({
   recommendations: [],
@@ -52,6 +93,11 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
   loading: false,
   error: null,
   filters: { ...DEFAULT_FILTERS },
+  detailOpen: false,
+  detailLoading: false,
+  detailError: null,
+  detailRecommendation: null,
+  detailAnalysis: null,
 
   fetchRecommendations: async (filters) => {
     const nextFilters = filters ? { ...get().filters, ...filters } : get().filters;
@@ -120,6 +166,15 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
     const idSet = new Set(normalizedIds);
     const nextHistoryList = previousState.historyList.filter((item) => !idSet.has(Number(item.id)));
     const removedVisibleCount = previousState.historyList.length - nextHistoryList.length;
+    const activeDetailRecordId = Number(previousState.detailRecommendation?.id);
+    const shouldCloseDetail = Number.isInteger(activeDetailRecordId) && idSet.has(activeDetailRecordId);
+    const previousDetailState = {
+      detailOpen: previousState.detailOpen,
+      detailLoading: previousState.detailLoading,
+      detailError: previousState.detailError,
+      detailRecommendation: previousState.detailRecommendation,
+      detailAnalysis: previousState.detailAnalysis,
+    };
 
     set({
       historyList: nextHistoryList,
@@ -129,6 +184,15 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
       historyMarket: nextMarket || undefined,
       loading: true,
       error: null,
+      ...(shouldCloseDetail
+        ? {
+            detailOpen: false,
+            detailLoading: false,
+            detailError: null,
+            detailRecommendation: null,
+            detailAnalysis: null,
+          }
+        : {}),
     });
 
     try {
@@ -175,6 +239,7 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
         historyMarket: previousState.historyMarket,
         loading: false,
         error: getParsedApiError(error).message,
+        ...(shouldCloseDetail ? previousDetailState : {}),
       });
     }
   },
@@ -250,6 +315,97 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
       .catch((error: unknown) => {
         set({ error: getParsedApiError(error).message });
       });
+  },
+
+  openHistoryDetail: async (item) => {
+    const fallbackRecommendation = item;
+    const recommendationRecordId = toPositiveRecordId(item.id);
+
+    set({
+      detailOpen: true,
+      detailLoading: true,
+      detailError: null,
+      detailRecommendation: fallbackRecommendation,
+      detailAnalysis: null,
+    });
+
+    if (!recommendationRecordId) {
+      set({ detailLoading: false });
+      return;
+    }
+
+    try {
+      const response = await recommendationApi.getDetailByLink({
+        recommendationRecordId,
+        analysisRecordId: toPositiveRecordId(item.analysisRecordId),
+        fallbackRecommendation,
+      });
+      set({
+        detailRecommendation: hasDetailRecommendation(response.recommendation)
+          ? response.recommendation
+          : fallbackRecommendation,
+        detailAnalysis: response.analysisDetail ?? null,
+        detailError: null,
+      });
+    } catch (error: unknown) {
+      set({
+        detailAnalysis: null,
+        detailError: getParsedApiError(error).message,
+      });
+    } finally {
+      set({ detailLoading: false });
+    }
+  },
+
+  openLiveDetail: async (item) => {
+    const fallbackRecommendation = normalizeLiveDetailRecommendation(item);
+    const recommendationRecordId = toPositiveRecordId(item.recommendationRecordId);
+    const analysisRecordId = toPositiveRecordId(item.analysisRecordId);
+
+    set({
+      detailOpen: true,
+      detailLoading: true,
+      detailError: null,
+      detailRecommendation: fallbackRecommendation,
+      detailAnalysis: null,
+    });
+
+    if (!recommendationRecordId && !analysisRecordId) {
+      set({ detailLoading: false });
+      return;
+    }
+
+    try {
+      const response = await recommendationApi.getDetailByLink({
+        recommendationRecordId,
+        analysisRecordId,
+        fallbackRecommendation,
+      });
+      set({
+        detailRecommendation: hasDetailRecommendation(response.recommendation)
+          ? response.recommendation
+          : fallbackRecommendation,
+        detailAnalysis: response.analysisDetail ?? null,
+        detailError: null,
+      });
+    } catch (error: unknown) {
+      set({
+        detailAnalysis: null,
+        detailError: getParsedApiError(error).message,
+      });
+    } finally {
+      set({ detailLoading: false });
+    }
+  },
+
+  closeDetail: () => {
+    set({
+      detailOpen: false,
+      detailLoading: false,
+      detailError: null,
+      detailRecommendation: null,
+      detailAnalysis: null,
+    });
   },
 
   setFilter: (key, value) => {

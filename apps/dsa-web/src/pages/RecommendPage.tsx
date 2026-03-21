@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import type { RecommendationHistoryItem } from '../api/recommendation';
 import { Select } from '../components/common/Select';
 import {
+  RecommendationDetailDrawer,
   RecommendationHeader,
   SummaryCards,
   SectorFilters,
@@ -11,7 +12,7 @@ import {
 } from '../components/recommendation';
 import { RecommendationHistory } from '../components/recommendation/RecommendationHistory';
 import { useRecommendationStore } from '../stores/recommendationStore';
-import type { RecommendationFilters } from '../types/recommendation';
+import type { RecommendationFilters, RecommendationItem } from '../types/recommendation';
 import { MarketRegion, RecommendationPriority } from '../types/recommendation';
 
 const PRIORITY_LABELS: Record<string, string> = {
@@ -51,6 +52,11 @@ const RecommendPage: React.FC = () => {
     historyLimit,
     historyOffset,
     historyMarket,
+    detailOpen,
+    detailLoading,
+    detailError,
+    detailRecommendation,
+    detailAnalysis,
     fetchRecommendations,
     fetchSummary,
     fetchHotSectors,
@@ -58,6 +64,9 @@ const RecommendPage: React.FC = () => {
     setFilter,
     fetchHistory,
     deleteHistoryByIds,
+    openHistoryDetail,
+    openLiveDetail: openLiveRecommendationDetail,
+    closeDetail,
   } = useRecommendationStore();
   
   const [viewMode, setViewMode] = useState<'live' | 'history'>('live');
@@ -69,16 +78,18 @@ const RecommendPage: React.FC = () => {
     void Promise.all([fetchRecommendations(), fetchSummary()]);
   }, [fetchRecommendations, fetchSummary]);
 
-  useEffect(() => {
-    setSelectedHistoryIds((previous) => {
-      const visibleIds = new Set(
-        historyList
-          .map((item) => Number(item.id))
-          .filter((id) => Number.isInteger(id) && id > 0),
-      );
-      return new Set(Array.from(previous).filter((id) => visibleIds.has(id)));
-    });
-  }, [historyList]);
+  const visibleHistoryIds = useMemo(
+    () =>
+      historyList
+        .map((item) => Number(item.id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    [historyList],
+  );
+
+  const visibleSelectedHistoryIds = useMemo(
+    () => new Set(visibleHistoryIds.filter((id) => selectedHistoryIds.has(id))),
+    [selectedHistoryIds, visibleHistoryIds],
+  );
 
   const handleViewModeChange = (mode: 'live' | 'history') => {
     setViewMode(mode);
@@ -89,8 +100,7 @@ const RecommendPage: React.FC = () => {
   };
 
   const handleHistoryOpenDetail = (item: RecommendationHistoryItem) => {
-    if (!item.code || !item.queryId) return;
-    navigate(`/?stock=${encodeURIComponent(item.code)}&from=rec-history&query_id=${encodeURIComponent(item.queryId)}`);
+    void openHistoryDetail(item);
   };
 
   const handleToggleHistorySelection = (recordId: number) => {
@@ -106,17 +116,20 @@ const RecommendPage: React.FC = () => {
   };
 
   const handleToggleSelectAllHistory = () => {
-    const visibleIds = historyList
-      .map((item) => Number(item.id))
-      .filter((id) => Number.isInteger(id) && id > 0);
-    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedHistoryIds.has(id));
+    const allSelected =
+      visibleHistoryIds.length > 0 &&
+      visibleHistoryIds.every((id) => visibleSelectedHistoryIds.has(id));
 
     setSelectedHistoryIds((previous) => {
       const next = new Set(previous);
       if (allSelected) {
-        visibleIds.forEach((id) => next.delete(id));
+        visibleHistoryIds.forEach((id) => {
+          next.delete(id);
+        });
       } else {
-        visibleIds.forEach((id) => next.add(id));
+        visibleHistoryIds.forEach((id) => {
+          next.add(id);
+        });
       }
       return next;
     });
@@ -126,7 +139,9 @@ const RecommendPage: React.FC = () => {
     await deleteHistoryByIds(recordIds, historyMarket, historyLimit, historyOffset);
     setSelectedHistoryIds((previous) => {
       const next = new Set(previous);
-      recordIds.forEach((id) => next.delete(id));
+      recordIds.forEach((id) => {
+        next.delete(id);
+      });
       return next;
     });
   };
@@ -244,6 +259,10 @@ const RecommendPage: React.FC = () => {
     }
   };
 
+  const handleOpenLiveDetail = (item: RecommendationItem) => {
+    void openLiveRecommendationDetail(item);
+  };
+
   return (
     <div className="min-h-screen flex flex-col" data-testid="recommend-page">
       <main className="flex-1 overflow-y-auto p-3 space-y-4">
@@ -349,17 +368,7 @@ const RecommendPage: React.FC = () => {
             <RecommendationTable
               recommendations={filteredRecommendations}
               loading={loading}
-              onRowClick={(stockCode) => {
-                const item = filteredRecommendations.find(r => r.stockCode === stockCode);
-                if (item) {
-                  const date = new Date(item.updatedAt);
-                  const dateStr = `${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}${String(date.getUTCDate()).padStart(2, '0')}`;
-                  const queryId = `rec_${stockCode}_${dateStr}`;
-                  navigate(`/?stock=${encodeURIComponent(stockCode)}&from=rec&query_id=${encodeURIComponent(queryId)}`);
-                } else {
-                  navigate(`/?stock=${encodeURIComponent(stockCode)}`);
-                }
-              }}
+              onRowClick={handleOpenLiveDetail}
             />
           </>
         ) : (
@@ -371,7 +380,7 @@ const RecommendPage: React.FC = () => {
             limit={historyLimit}
             offset={historyOffset}
             market={historyMarket}
-            selectedIds={selectedHistoryIds}
+            selectedIds={visibleSelectedHistoryIds}
             onMarketChange={(market) => {
               setSelectedHistoryIds(new Set());
               void fetchHistory(market, historyLimit, 0);
@@ -392,6 +401,24 @@ const RecommendPage: React.FC = () => {
           />
         )}
       </main>
+      <RecommendationDetailDrawer
+        isOpen={detailOpen}
+        loading={detailLoading}
+        error={detailError}
+        recommendation={detailRecommendation}
+        analysisDetail={detailAnalysis}
+        onClose={() => {
+          closeDetail();
+        }}
+        onAskAi={(report) => {
+          if (report.meta.id === undefined) {
+            return;
+          }
+          navigate(
+            `/chat?stock=${encodeURIComponent(report.meta.stockCode)}&name=${encodeURIComponent(report.meta.stockName || '')}&recordId=${report.meta.id}`,
+          );
+        }}
+      />
     </div>
   );
 };

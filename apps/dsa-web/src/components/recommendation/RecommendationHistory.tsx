@@ -197,7 +197,7 @@ export const RecommendationHistory: React.FC<RecommendationHistoryProps> = ({
               const priorityVariant = PRIORITY_BADGE_VARIANT[item.priority || ''] || 'default';
               const score = item.compositeScore != null ? item.compositeScore.toFixed(0) : '--';
               const isChecked = Number.isInteger(recordId) && selectedIds.has(recordId);
-              const canOpenDetail = Boolean(item.queryId);
+              const canOpenDetail = Number.isInteger(recordId) && recordId > 0;
 
               return (
                 <div
@@ -230,7 +230,7 @@ export const RecommendationHistory: React.FC<RecommendationHistoryProps> = ({
                       }}
                       disabled={!canOpenDetail}
                     >
-                      <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-4">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-3 mb-1 flex-wrap">
                             <span className="text-base font-semibold text-white tracking-tight">{name}</span>
@@ -264,27 +264,27 @@ export const RecommendationHistory: React.FC<RecommendationHistoryProps> = ({
                           )}
                         </div>
 
-                        <div className="shrink-0 flex items-center pt-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              if (Number.isInteger(recordId)) {
-                                setDeleteTarget({ ids: [recordId], label: code });
-                              }
-                            }}
-                            className="text-muted-text hover:text-danger hover:bg-danger/10 px-2"
-                            title="删除记录"
-                            disabled={deleting || !Number.isInteger(recordId)}
-                          >
-                            <svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </Button>
-                        </div>
                       </div>
                     </button>
+
+                    <div className="shrink-0 flex items-center pt-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          if (Number.isInteger(recordId)) {
+                            setDeleteTarget({ ids: [recordId], label: code });
+                          }
+                        }}
+                        className="text-muted-text hover:text-danger hover:bg-danger/10 px-2"
+                        title="删除记录"
+                        disabled={deleting || !Number.isInteger(recordId)}
+                      >
+                        <svg aria-hidden="true" className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </Button>
+                    </div>
                   </div>
                 </div>
               );

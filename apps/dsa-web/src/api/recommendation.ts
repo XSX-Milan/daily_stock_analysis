@@ -1,5 +1,6 @@
 import apiClient from './index';
 import { toCamelCase } from './utils';
+import type { AnalysisReport } from '../types/analysis';
 import type {
   MarketRegion,
   RecommendationItem,
@@ -20,6 +21,8 @@ type RawCompositeScore = {
 };
 
 type RawRecommendationItem = Omit<Partial<RecommendationItem>, 'compositeScore'> & {
+  id?: number;
+  recommendationRecordId?: number | null;
   code?: string;
   region?: MarketRegion | string;
   currentPrice?: number;
@@ -46,6 +49,7 @@ export interface RecommendationHistoryParams {
 export interface RecommendationHistoryItem {
   id?: number;
   queryId?: string | null;
+  analysisRecordId?: number | null;
   code?: string;
   name?: string;
   sector?: string | null;
@@ -70,8 +74,27 @@ export interface RecommendationHistoryResponse {
   filters?: RecommendationHistoryParams;
 }
 
+export interface RecommendationDetailResponse {
+  recommendation: RecommendationHistoryItem;
+  analysisDetail?: AnalysisReport | null;
+}
+
+export interface RecommendationDetailLookupParams {
+  recommendationRecordId?: number | null;
+  analysisRecordId?: number | null;
+  fallbackRecommendation?: RecommendationHistoryItem;
+}
+
 const isRawCompositeScore = (value: RawRecommendationItem['compositeScore']): value is RawCompositeScore => {
   return typeof value === 'object' && value !== null;
+};
+
+const toPositiveIntOrNull = (value: unknown): number | null => {
+  if (typeof value !== 'number') {
+    return null;
+  }
+  const normalized = Number(value);
+  return Number.isInteger(normalized) && normalized > 0 ? normalized : null;
 };
 
 const normalizeRecommendationItem = (input: unknown): RecommendationItem => {
@@ -99,11 +122,14 @@ const normalizeRecommendationItem = (input: unknown): RecommendationItem => {
   const aiRefined = item.aiRefined ?? (isRawCompositeScore(composite) ? composite.aiRefined : undefined);
 
   return {
+    recommendationRecordId: toPositiveIntOrNull(item.recommendationRecordId ?? item.id),
     stockCode: item.stockCode ?? item.code ?? '',
     name: item.name ?? item.stockName ?? '',
     stockName: item.stockName ?? item.name ?? '',
     market: item.market ?? item.region ?? 'CN',
     region: (item.region ?? item.market) as MarketRegion,
+    analysisRecordId:
+      typeof item.analysisRecordId === 'number' ? item.analysisRecordId : null,
     sector: item.sector ?? null,
     scores: item.scores ?? scoresFromComposite,
     compositeScore,
@@ -160,6 +186,19 @@ const normalizeRecommendationHistoryResponse = (input: Record<string, unknown>):
     items: normalizeRecommendationHistory(data.items),
     total: data.total ?? 0,
     filters: data.filters,
+  };
+};
+
+const normalizeRecommendationDetailResponse = (
+  input: Record<string, unknown>,
+): RecommendationDetailResponse => {
+  const data = toCamelCase<{
+    recommendation?: RecommendationHistoryItem;
+    analysisDetail?: AnalysisReport | null;
+  }>(input);
+  return {
+    recommendation: data.recommendation ?? {},
+    analysisDetail: data.analysisDetail ?? null,
   };
 };
 
@@ -233,6 +272,39 @@ export const deleteHistoryByIds = async (recordIds: number[]): Promise<Recommend
   return toCamelCase<RecommendationHistoryDeleteResponse>(response.data);
 };
 
+export const getDetail = async (recordId: number): Promise<RecommendationDetailResponse> => {
+  const response = await apiClient.get<Record<string, unknown>>(`/api/v1/recommendation/detail/${recordId}`);
+  return normalizeRecommendationDetailResponse(response.data);
+};
+
+const getAnalysisDetailById = async (analysisRecordId: number): Promise<AnalysisReport> => {
+  const response = await apiClient.get<Record<string, unknown>>(`/api/v1/history/${analysisRecordId}`);
+  return toCamelCase<AnalysisReport>(response.data);
+};
+
+export const getDetailByLink = async (
+  params: RecommendationDetailLookupParams,
+): Promise<RecommendationDetailResponse> => {
+  const recommendationRecordId = toPositiveIntOrNull(params.recommendationRecordId);
+  if (recommendationRecordId) {
+    return getDetail(recommendationRecordId);
+  }
+
+  const analysisRecordId = toPositiveIntOrNull(params.analysisRecordId);
+  if (!analysisRecordId) {
+    return {
+      recommendation: params.fallbackRecommendation ?? {},
+      analysisDetail: null,
+    };
+  }
+
+  const analysisDetail = await getAnalysisDetailById(analysisRecordId);
+  return {
+    recommendation: params.fallbackRecommendation ?? {},
+    analysisDetail,
+  };
+};
+
 export const getWatchlist = async (): Promise<WatchlistItem[]> => {
   const response = await apiClient.get<Record<string, unknown>>('/api/v1/recommendation/watchlist');
   return toCamelCase<WatchlistItem[]>(response.data);
@@ -262,6 +334,8 @@ export const recommendationApi = {
   refreshRecommendations,
   getHotSectors,
   getHistory,
+  getDetail,
+  getDetailByLink,
   deleteHistoryByIds,
   getSummary,
   getWatchlist,

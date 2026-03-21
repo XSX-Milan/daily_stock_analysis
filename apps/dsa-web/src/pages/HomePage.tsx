@@ -1,8 +1,6 @@
 import type React from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { getParsedApiError } from '../api/error';
-import { historyApi } from '../api/history';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ApiErrorAlert, ConfirmDialog, Button } from '../components/common';
 import { StockAutocomplete } from '../components/StockAutocomplete';
 import { HistoryList } from '../components/history';
@@ -14,10 +12,8 @@ import { getReportText, normalizeReportLanguage } from '../utils/reportLanguage'
 
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const handledRecommendationLinkRef = useRef(false);
 
   const {
     query,
@@ -67,37 +63,6 @@ const HomePage: React.FC = () => {
     syncTaskFailed,
     removeTask,
   });
-
-  useEffect(() => {
-    if (handledRecommendationLinkRef.current) {
-      return;
-    }
-
-    const queryId = searchParams.get('query_id')?.trim();
-    const source = searchParams.get('from')?.trim();
-    if (!queryId || (source !== 'rec' && source !== 'rec-history')) {
-      return;
-    }
-
-    handledRecommendationLinkRef.current = true;
-    setSearchParams({}, { replace: true });
-    useStockPoolStore.setState({ isLoadingReport: true });
-
-    void historyApi.getDetail(queryId)
-      .then((report) => {
-        useStockPoolStore.setState({
-          selectedReport: report,
-          error: null,
-          isLoadingReport: false,
-        });
-      })
-      .catch((err) => {
-        useStockPoolStore.setState({
-          error: getParsedApiError(err),
-          isLoadingReport: false,
-        });
-      });
-  }, [searchParams, setSearchParams]);
 
   const selectedIds = useMemo(() => new Set(selectedHistoryIds), [selectedHistoryIds]);
 

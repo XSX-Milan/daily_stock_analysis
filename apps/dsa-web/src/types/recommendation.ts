@@ -17,11 +17,13 @@ export const MarketRegion = {
 export type MarketRegion = (typeof MarketRegion)[keyof typeof MarketRegion];
 
 export interface RecommendationItem {
+  recommendationRecordId?: number | null;
   stockCode: string;
   name: string;
   stockName?: string;
   market: MarketRegion | string;
   region?: MarketRegion;
+  analysisRecordId?: number | null;
   sector?: string | null;
   scores: Record<string, number>;
   compositeScore: number;

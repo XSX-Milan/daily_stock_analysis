@@ -7,7 +7,7 @@ import { Badge } from '../common/Badge';
 
 interface RecommendationTableProps {
   recommendations: RecommendationItem[];
-  onRowClick: (stockCode: string) => void;
+  onRowClick: (item: RecommendationItem) => void;
   loading: boolean;
 }
 
@@ -165,7 +165,7 @@ export const RecommendationTable: React.FC<RecommendationTableProps> = ({
                     className={`bg-card hover:bg-elevated transition-colors cursor-pointer ${
                       showSummaryRow ? '' : 'border-b border-white/5'
                     }`}
-                    onClick={() => onRowClick?.(item.stockCode)}
+                    onClick={() => onRowClick?.(item)}
                     data-testid={`table-row-${item.stockCode}`}
                   >
                     <td className="px-3 py-2 text-secondary whitespace-nowrap">
@@ -200,7 +200,7 @@ export const RecommendationTable: React.FC<RecommendationTableProps> = ({
                   {showSummaryRow && (
                     <tr
                       className="border-b border-white/5 bg-card hover:bg-elevated transition-colors cursor-pointer"
-                      onClick={() => onRowClick?.(item.stockCode)}
+                      onClick={() => onRowClick?.(item)}
                     >
                       <td colSpan={10} className="px-3 pb-3 pt-0 text-xs whitespace-normal">
                         <div className="flex items-start gap-1.5 text-muted">

@@ -15,16 +15,34 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
   onSectorChange,
   hotSectorNames = [],
 }) => {
-  const sectors = useMemo(() => {
-    const uniqueSectors = new Set<string>();
+  const recommendationSectors = useMemo(() => {
+    const sectorSet = new Set<string>();
     recommendations.forEach((item) => {
       const sector = item.sector?.trim();
       if (sector) {
-        uniqueSectors.add(sector);
+        sectorSet.add(sector);
       }
     });
-    return Array.from(uniqueSectors).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    return sectorSet;
   }, [recommendations]);
+
+  const normalizedHotSectorNames = useMemo(
+    () => Array.from(new Set(hotSectorNames.map((name) => String(name).trim()).filter((name) => name.length > 0))),
+    [hotSectorNames],
+  );
+
+  const sectors = useMemo(() => {
+    const mergedSectors = new Set<string>(recommendationSectors);
+    normalizedHotSectorNames.forEach((sector) => {
+      mergedSectors.add(sector);
+    });
+    return Array.from(mergedSectors).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  }, [normalizedHotSectorNames, recommendationSectors]);
+
+  const hotSectorNameSet = useMemo(
+    () => new Set(normalizedHotSectorNames),
+    [normalizedHotSectorNames],
+  );
 
   const totalCount = recommendations.length;
   const sectorCount = sectors.length;
@@ -56,7 +74,7 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
         
         {sectors.map((sector) => {
           const isActive = selectedSector === sector;
-          const isHot = hotSectorNames.includes(sector);
+          const isHot = hotSectorNameSet.has(sector);
           return (
             <button
               key={sector}

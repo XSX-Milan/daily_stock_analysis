@@ -26,6 +26,8 @@ const resetStore = () => {
   useRecommendationStore.setState({
     recommendations: [],
     hotSectors: [],
+    hotSectorsMarket: undefined,
+    hotSectorsByMarket: {},
     historyList: [],
     historyTotal: 0,
     historyLimit: 50,
@@ -318,5 +320,84 @@ describe('recommendationStore', () => {
     expect(state.detailError).toBeNull();
     expect(state.detailRecommendation).toBeNull();
     expect(state.detailAnalysis).toBeNull();
+  });
+
+  it('stores normalized market when fetching hot sectors succeeds', async () => {
+    vi.mocked(recommendationApi.getHotSectors).mockResolvedValue({
+      sectors: [
+        {
+          name: '科技',
+          changePct: 1.2,
+          stockCount: 18,
+        },
+      ],
+    });
+
+    const result = await useRecommendationStore.getState().fetchHotSectors(' cn ');
+
+    const state = useRecommendationStore.getState();
+    expect(result).toBe(true);
+    expect(recommendationApi.getHotSectors).toHaveBeenCalledWith('CN');
+    expect(state.hotSectorsMarket).toBe('CN');
+    expect(state.hotSectors).toEqual([
+      {
+        name: '科技',
+        changePct: 1.2,
+        stockCount: 18,
+      },
+    ]);
+    expect(state.hotSectorsByMarket.CN).toEqual([
+      {
+        name: '科技',
+        changePct: 1.2,
+        stockCount: 18,
+      },
+    ]);
+  });
+
+  it('returns false when fetching hot sectors without market', async () => {
+    const result = await useRecommendationStore.getState().fetchHotSectors('');
+
+    const state = useRecommendationStore.getState();
+    expect(result).toBe(false);
+    expect(recommendationApi.getHotSectors).not.toHaveBeenCalled();
+    expect(state.hotSectorsMarket).toBeUndefined();
+    expect(state.hotSectorsByMarket).toEqual({});
+    expect(state.error).toBe('请先选择市场后再获取热门板块。');
+  });
+
+  it('drops stale region filter when refreshing recommendations with market', async () => {
+    useRecommendationStore.setState({
+      filters: {
+        region: 'CN',
+        priority: 'BUY_NOW',
+      },
+    });
+    vi.mocked(recommendationApi.triggerRefresh).mockResolvedValue({
+      items: [],
+      total: 0,
+      filters: {},
+    });
+    vi.mocked(recommendationApi.getRecommendations).mockResolvedValue({
+      items: [],
+      total: 0,
+      filters: {},
+    });
+    vi.mocked(recommendationApi.getSummary).mockResolvedValue({
+      buyNow: 0,
+      position: 0,
+      waitPullback: 0,
+      noEntry: 0,
+    });
+
+    await useRecommendationStore.getState().triggerRefresh({
+      market: 'US',
+      sector: 'Technology',
+    });
+
+    const refreshFilters = vi.mocked(recommendationApi.getRecommendations).mock.calls[0]?.[0];
+    expect(refreshFilters).toBeDefined();
+    expect(refreshFilters?.market).toBe('US');
+    expect('region' in (refreshFilters ?? {})).toBe(false);
   });
 });

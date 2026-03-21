@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import RecommendPage from '../RecommendPage';
@@ -11,6 +11,8 @@ const mockStoreState = vi.hoisted(() => ({
   loading: false,
   error: null,
   hotSectors: [] as Array<Record<string, unknown>>,
+  hotSectorsMarket: undefined as string | undefined,
+  hotSectorsByMarket: {} as Record<string, Array<Record<string, unknown>>>,
   historyList: [] as Array<Record<string, unknown>>,
   historyTotal: 0,
   historyLimit: 50,
@@ -23,7 +25,7 @@ const mockStoreState = vi.hoisted(() => ({
   detailAnalysis: null,
   fetchRecommendations: vi.fn().mockResolvedValue(undefined),
   fetchSummary: vi.fn().mockResolvedValue(undefined),
-  fetchHotSectors: vi.fn().mockResolvedValue(undefined),
+  fetchHotSectors: vi.fn().mockResolvedValue(true),
   triggerRefresh: vi.fn().mockResolvedValue(undefined),
   setFilter: vi.fn(),
   fetchHistory: vi.fn().mockResolvedValue(undefined),
@@ -63,6 +65,8 @@ describe('RecommendPage', () => {
       loading: false,
       error: null,
       hotSectors: [],
+      hotSectorsMarket: undefined,
+      hotSectorsByMarket: {},
       historyList: [],
       historyTotal: 0,
       historyLimit: 50,
@@ -111,6 +115,57 @@ describe('RecommendPage', () => {
     expect(navigateMock).not.toHaveBeenCalledWith(expect.stringContaining('/?stock='));
   });
 
+  it('auto-fetches hot sectors on init when sector data is empty', async () => {
+    mockStoreState.filters = {};
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [];
+    mockStoreState.hotSectorsMarket = undefined;
+    mockStoreState.hotSectorsByMarket = {};
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('CN');
+    });
+  });
+
+  it('auto-fetches hot sectors when market cache is missing even with recommendation sectors', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.recommendations = [
+      {
+        stockCode: 'AAPL',
+        stockName: 'Apple',
+        name: 'Apple',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 12,
+        sector: 'Tech',
+        scores: {},
+        compositeScore: 88,
+        priority: 'BUY_NOW',
+        aiSummary: 'Momentum remains strong.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+    ];
+    mockStoreState.hotSectors = [];
+    mockStoreState.hotSectorsMarket = undefined;
+    mockStoreState.hotSectorsByMarket = {};
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('US');
+    });
+  });
+
   it('opens history recommendation detail through recommendationStore action', async () => {
     mockStoreState.historyList = [
       {
@@ -148,5 +203,170 @@ describe('RecommendPage', () => {
       }),
     );
     expect(navigateMock).not.toHaveBeenCalledWith(expect.stringContaining('/?stock='));
+  });
+
+  it('keeps per-market hot sector cache when switching markets', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [];
+    mockStoreState.hotSectorsMarket = undefined;
+    mockStoreState.hotSectorsByMarket = {};
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('CN');
+    });
+
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.hotSectorsMarket = 'CN';
+    mockStoreState.hotSectors = [{ name: '银行' }];
+    mockStoreState.hotSectorsByMarket = {
+      CN: [{ name: '银行' }],
+    };
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('US');
+    });
+
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.hotSectorsMarket = 'US';
+    mockStoreState.hotSectors = [{ name: 'Technology' }];
+    mockStoreState.hotSectorsByMarket = {
+      CN: [{ name: '银行' }],
+      US: [{ name: 'Technology' }],
+    };
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(mockStoreState.fetchHotSectors).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not auto-refetch when empty result has already been cached for market', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [];
+    mockStoreState.hotSectorsMarket = 'CN';
+    mockStoreState.hotSectorsByMarket = {
+      CN: [],
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchRecommendations).toHaveBeenCalledTimes(1);
+    });
+    expect(mockStoreState.fetchHotSectors).not.toHaveBeenCalled();
+  });
+
+  it('does not loop auto-fetch after one failed market fetch attempt', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [];
+    mockStoreState.hotSectorsMarket = undefined;
+    mockStoreState.hotSectorsByMarket = {};
+    mockStoreState.fetchHotSectors = vi.fn().mockResolvedValue(false);
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledTimes(1);
+    });
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(mockStoreState.fetchHotSectors).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders sector tags from hot-sector cache when recommendation sectors are empty', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [
+      {
+        stockCode: '600519',
+        stockName: 'Moutai',
+        name: 'Moutai',
+        market: 'CN',
+        region: 'CN',
+        analysisRecordId: 12,
+        scores: {},
+        compositeScore: 88,
+        priority: 'BUY_NOW',
+        aiSummary: 'Momentum remains strong.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+    ];
+    mockStoreState.hotSectors = [
+      { name: '逆变器' },
+      { name: '算力' },
+    ];
+    mockStoreState.hotSectorsMarket = 'CN';
+    mockStoreState.hotSectorsByMarket = {
+      CN: [{ name: '逆变器' }, { name: '算力' }],
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('sector-tag-逆变器')).toBeInTheDocument();
+    expect(screen.getByTestId('sector-tag-算力')).toBeInTheDocument();
+    expect(screen.getByText('2 个板块')).toBeInTheDocument();
+    expect(mockStoreState.fetchHotSectors).not.toHaveBeenCalled();
+  });
+
+  it('keeps hot-sector selection active when recommendation sectors are empty', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [{ name: '逆变器' }];
+    mockStoreState.hotSectorsMarket = 'CN';
+    mockStoreState.hotSectorsByMarket = {
+      CN: [{ name: '逆变器' }],
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByTestId('sector-tag-逆变器'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('推荐');
+    });
+
+    fireEvent.click(screen.getByTestId('sector-tag-逆变器'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('智能推荐');
+    });
   });
 });

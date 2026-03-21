@@ -13,6 +13,8 @@ import type {
 interface RecommendationState {
   recommendations: RecommendationItem[];
   hotSectors: RecommendationHotSector[];
+  hotSectorsMarket?: string;
+  hotSectorsByMarket: Record<string, RecommendationHotSector[]>;
   historyList: RecommendationHistoryItem[];
   historyTotal: number;
   historyLimit: number;
@@ -35,7 +37,7 @@ type RecommendationStoreRefreshRequest = Omit<RecommendationRefreshRequest, 'sec
 
 interface RecommendationActions {
   fetchRecommendations: (filters?: RecommendationFilters) => Promise<void>;
-  fetchHotSectors: (market: string) => Promise<void>;
+  fetchHotSectors: (market: string) => Promise<boolean>;
   fetchHistory: (market?: string, limit?: number, offset?: number) => Promise<void>;
   deleteHistoryByIds: (recordIds: number[], market?: string, limit?: number, offset?: number) => Promise<void>;
   fetchSummary: () => Promise<void>;
@@ -84,6 +86,8 @@ const hasDetailRecommendation = (item: RecommendationHistoryItem | null | undefi
 export const useRecommendationStore = create<RecommendationState & RecommendationActions>((set, get) => ({
   recommendations: [],
   hotSectors: [],
+  hotSectorsMarket: undefined,
+  hotSectorsByMarket: {},
   historyList: [],
   historyTotal: 0,
   historyLimit: 50,
@@ -114,15 +118,26 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
     const normalizedMarket = String(market ?? '').trim().toUpperCase();
     if (!normalizedMarket) {
       set({ error: '请先选择市场后再获取热门板块。' });
-      return;
+      return false;
     }
 
     set({ loading: true, error: null });
     try {
       const response = await recommendationApi.getHotSectors(normalizedMarket);
-      set({ hotSectors: response.sectors, loading: false, error: null });
+      set((state) => ({
+        hotSectors: response.sectors,
+        hotSectorsMarket: normalizedMarket,
+        hotSectorsByMarket: {
+          ...state.hotSectorsByMarket,
+          [normalizedMarket]: response.sectors,
+        },
+        loading: false,
+        error: null,
+      }));
+      return true;
     } catch (error: unknown) {
       set({ loading: false, error: getParsedApiError(error).message });
+      return false;
     }
   },
 
@@ -299,6 +314,7 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
             market,
           };
         })();
+    delete nextFilters.region;
 
     void Promise.all([
       recommendationApi.getRecommendations(nextFilters),

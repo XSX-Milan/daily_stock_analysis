@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { RecommendationHistoryItem } from '../api/recommendation';
 import { Select } from '../components/common/Select';
@@ -47,6 +47,8 @@ const RecommendPage: React.FC = () => {
     loading,
     error,
     hotSectors,
+    hotSectorsMarket,
+    hotSectorsByMarket,
     historyList,
     historyTotal,
     historyLimit,
@@ -73,6 +75,8 @@ const RecommendPage: React.FC = () => {
   const [selectedSector, setSelectedSector] = useState<string | null>(null);
   const [smartRecommendAttempted, setSmartRecommendAttempted] = useState(false);
   const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<number>>(new Set());
+  const attemptedHotSectorFetchByMarketRef = useRef<Set<string>>(new Set());
+  const inFlightHotSectorFetchByMarketRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     void Promise.all([fetchRecommendations(), fetchSummary()]);
@@ -149,6 +153,18 @@ const RecommendPage: React.FC = () => {
   const selectedMarket = normalizeMarket(filters.market ?? filters.region);
   const selectedPriority = String(filters.priority ?? '');
 
+  const fallbackHotSectorMarket = useMemo(() => {
+    if (selectedMarket) {
+      return selectedMarket;
+    }
+
+    const firstRecommendationMarket = recommendations
+      .map((item) => normalizeMarket(item.market ?? item.region))
+      .find((market) => market.length > 0);
+
+    return firstRecommendationMarket || MarketRegion.CN;
+  }, [selectedMarket, recommendations]);
+
   const marketOptions = useMemo(
     () => MARKET_ORDER.map((market) => ({ value: market, label: MARKET_LABELS[market] ?? market })),
     [],
@@ -194,12 +210,72 @@ const RecommendPage: React.FC = () => {
     return sectors;
   }, [recommendationPool]);
 
-  const activeSector = selectedSector && availableSectors.has(selectedSector) ? selectedSector : null;
+  const activeHotSectors = useMemo(
+    () => {
+      const marketScopedHotSectors = hotSectorsByMarket[fallbackHotSectorMarket];
+      if (Array.isArray(marketScopedHotSectors)) {
+        return marketScopedHotSectors;
+      }
+      if (hotSectorsMarket === fallbackHotSectorMarket) {
+        return hotSectors;
+      }
+      return [];
+    },
+    [fallbackHotSectorMarket, hotSectors, hotSectorsByMarket, hotSectorsMarket],
+  );
+
+  const selectableSectors = useMemo(() => {
+    const sectors = new Set<string>(availableSectors);
+    activeHotSectors.forEach((sector) => {
+      const sectorName = String(sector.name ?? '').trim();
+      if (sectorName) {
+        sectors.add(sectorName);
+      }
+    });
+    return sectors;
+  }, [activeHotSectors, availableSectors]);
+
+  const activeSector = selectedSector && selectableSectors.has(selectedSector) ? selectedSector : null;
 
   const filteredRecommendations = useMemo(
     () => recommendationPool.filter((item) => !activeSector || item.sector?.trim() === activeSector),
     [recommendationPool, activeSector],
   );
+
+  const hasActiveHotSectorData = activeHotSectors.length > 0;
+  const hasMarketScopedHotSectorRecord = useMemo(
+    () => Object.prototype.hasOwnProperty.call(hotSectorsByMarket, fallbackHotSectorMarket),
+    [fallbackHotSectorMarket, hotSectorsByMarket],
+  );
+
+  useEffect(() => {
+    if (loading || viewMode !== 'live') {
+      return;
+    }
+    if (hasActiveHotSectorData || hasMarketScopedHotSectorRecord) {
+      return;
+    }
+    if (inFlightHotSectorFetchByMarketRef.current.has(fallbackHotSectorMarket)) {
+      return;
+    }
+    if (attemptedHotSectorFetchByMarketRef.current.has(fallbackHotSectorMarket)) {
+      return;
+    }
+
+    attemptedHotSectorFetchByMarketRef.current.add(fallbackHotSectorMarket);
+    inFlightHotSectorFetchByMarketRef.current.add(fallbackHotSectorMarket);
+    void fetchHotSectors(fallbackHotSectorMarket)
+      .finally(() => {
+        inFlightHotSectorFetchByMarketRef.current.delete(fallbackHotSectorMarket);
+      });
+  }, [
+    fallbackHotSectorMarket,
+    fetchHotSectors,
+    hasActiveHotSectorData,
+    hasMarketScopedHotSectorRecord,
+    loading,
+    viewMode,
+  ]);
 
   const refreshDisabled = loading || !selectedMarket;
 
@@ -210,9 +286,10 @@ const RecommendPage: React.FC = () => {
       priority,
     };
 
+    delete nextFilters.region;
+
     if (!nextFilters.market) {
       delete nextFilters.market;
-      delete nextFilters.region;
     }
     if (!nextFilters.priority) {
       delete nextFilters.priority;
@@ -336,15 +413,15 @@ const RecommendPage: React.FC = () => {
               recommendations={recommendationPool}
               selectedSector={activeSector}
               onSectorChange={handleSectorChange}
-              hotSectorNames={hotSectors.map((s) => s.name)}
+              hotSectorNames={activeHotSectors.map((s) => s.name)}
             />
 
             {!activeSector && smartRecommendAttempted && (
               <div className="glass-card border border-orange-500/30 bg-orange-500/5 p-3 flex items-center gap-2 text-sm" data-testid="hot-sectors-display">
                 <span className="text-orange-400 font-medium whitespace-nowrap">🔥 智能推荐热门板块：</span>
-                {hotSectors.length > 0 ? (
+                {activeHotSectors.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
-                    {hotSectors.map((sector) => (
+                    {activeHotSectors.map((sector) => (
                       <span key={sector.name} className="px-2 py-0.5 rounded bg-orange-500/20 text-orange-300 text-xs">
                         {sector.name}
                         {sector.changePct !== undefined && sector.changePct !== null && (

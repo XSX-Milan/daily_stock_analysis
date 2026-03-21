@@ -360,6 +360,27 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertIsNone(report.details.financial_report)
         self.assertIsNone(report.details.dividend_metrics)
 
+    def test_resolve_and_get_detail_prefers_integer_history_id(self) -> None:
+        first_record_id = self._save_history("query_resolve_integer_001")
+        self._save_history(str(first_record_id))
+
+        detail = HistoryService(self.db).resolve_and_get_detail(str(first_record_id))
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.get("id"), first_record_id)
+        self.assertEqual(detail.get("query_id"), "query_resolve_integer_001")
+
+    def test_resolve_and_get_detail_non_recommendation_query_id_uses_legacy_fallback(self) -> None:
+        record_id = self._save_history("query_resolve_legacy_001")
+
+        detail = HistoryService(self.db).resolve_and_get_detail("query_resolve_legacy_001")
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.get("id"), record_id)
+        self.assertEqual(detail.get("query_id"), "query_resolve_legacy_001")
+
     def test_history_markdown_localizes_english_report_and_placeholder_name(self) -> None:
         """History markdown should preserve report_language for English reports."""
         result = AnalysisResult(

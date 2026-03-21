@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, Mock, call, patch
 
 import pandas as pd
@@ -19,6 +19,11 @@ from src.recommendation.models import (
     MarketRegion,
     RecommendationPriority,
     ScoringWeights,
+    StockRecommendation,
+)
+from src.recommendation.trading_day_policy import (
+    derive_recommendation_trading_day,
+    should_bypass_recommendation_reuse,
 )
 
 
@@ -49,6 +54,9 @@ def build_fast_service(config: SimpleNamespace):
         patch("src.services.recommendation_service.SectorScannerService"),
         patch("src.services.recommendation_service.ScoringEngine"),
         patch(
+            "src.services.recommendation_service.AnalysisResultService"
+        ) as analysis_result_service_cls,
+        patch(
             "src.services.recommendation_service.DatabaseManager.get_instance",
             return_value=db_manager,
         ),
@@ -57,30 +65,18 @@ def build_fast_service(config: SimpleNamespace):
 
         service = RecommendationService(config=config)
 
-    def _mock_extract_sniper_points(result):
-        if hasattr(result, "get_sniper_points"):
-            return result.get_sniper_points() or {}
-        return {}
-
-    def _mock_build_raw_result(result):
-        data = result.to_dict() if hasattr(result, "to_dict") else {}
-        payload = dict(data) if isinstance(data, dict) else {"result": data}
-        payload.update(
-            {
-                "data_sources": getattr(result, "data_sources", ""),
-                "raw_response": getattr(result, "raw_response", None),
-            }
-        )
-        return payload
-
-    db_manager._extract_sniper_points = Mock(side_effect=_mock_extract_sniper_points)
-    db_manager._build_raw_result = Mock(side_effect=_mock_build_raw_result)
-    db_manager._safe_json_dumps = Mock(
-        side_effect=lambda data: json.dumps(data, ensure_ascii=False, default=str)
+    service.analysis_result_service = analysis_result_service_cls.return_value
+    service.analysis_result_service.save_recommendation_result = Mock(
+        return_value=SimpleNamespace(analysis_id=1, query_id="rec_600519_20240101_1")
     )
+    service.analysis_result_service.get_by_id = Mock(return_value=SimpleNamespace(id=1))
 
     service.recommendation_repo.get_latest = Mock(return_value=None)
+    service.recommendation_repo.get_linked_recommendation_for_date = Mock(
+        return_value=None
+    )
     service.recommendation_repo.save_batch = Mock()
+    service.recommendation_repo.update_analysis_record_link = Mock(return_value=1)
     service.recommendation_repo.get_list = Mock(return_value=[])
     service.recommendation_repo.get_count = Mock(return_value=0)
     service.recommendation_repo.get_priority_counts = Mock(return_value={})
@@ -88,6 +84,7 @@ def build_fast_service(config: SimpleNamespace):
     service.sector_cache_service.save_sector_info = Mock()
     setattr(service, "_test_db_manager", db_manager)
     setattr(service, "_test_db_session", session)
+    setattr(service, "_test_analysis_result_service", service.analysis_result_service)
     return service
 
 
@@ -122,6 +119,9 @@ class RecommendationServiceTestCase(unittest.TestCase):
                 "src.services.recommendation_service.SectorScannerService"
             ) as sector_cls,
             patch("src.services.recommendation_service.ScoringEngine") as engine_cls,
+            patch(
+                "src.services.recommendation_service.AnalysisResultService"
+            ) as analysis_result_service_cls,
             patch("src.services.recommendation_service.DatabaseManager") as db_cls,
         ):
             from src.services.recommendation_service import RecommendationService
@@ -140,6 +140,9 @@ class RecommendationServiceTestCase(unittest.TestCase):
             max_universe=120,
         )
         db_cls.get_instance.assert_called()
+        analysis_result_service_cls.assert_called_once_with(
+            db_manager=db_cls.get_instance.return_value
+        )
         engine_kwargs = engine_cls.call_args.kwargs
         self.assertIn("weights", engine_kwargs)
         self.assertIs(engine_kwargs["ai_refiner"], gemini_cls.return_value)
@@ -319,7 +322,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
         )
 
     def test_refresh_all_auto_cn_uses_ranking_fallback_when_scan_empty(self) -> None:
-        config = SimpleNamespace(max_workers=2)
+        config = SimpleNamespace(max_workers=2, recommend_top_n_per_sector=5)
         service = build_fast_service(config)
         service.sector_scanner_service.scan_sectors = Mock(
             side_effect=AssertionError("scan_sectors should not be called")
@@ -355,7 +358,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
     def test_refresh_all_auto_cn_uses_generic_persisted_fallback_when_sector_specific_empty(
         self,
     ) -> None:
-        config = SimpleNamespace(max_workers=2)
+        config = SimpleNamespace(max_workers=2, recommend_top_n_per_sector=5)
         service = build_fast_service(config)
         service.sector_scanner_service.scan_sectors = Mock(
             side_effect=AssertionError("scan_sectors should not be called")
@@ -507,7 +510,304 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         service._split_recent_cached_codes.assert_not_called()
+        cast(
+            Mock, service.recommendation_repo.get_linked_recommendation_for_date
+        ).assert_not_called()
         service._build_stock_payload.assert_called_once()
+
+    def test_refresh_stocks_force_refresh_creates_new_analysis_record_id(self) -> None:
+        config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
+        service = build_fast_service(config)
+
+        existing_analysis_record_id = 321
+        service.recommendation_repo.get_linked_recommendation_for_date = Mock(
+            return_value=(Mock(), existing_analysis_record_id)
+        )
+
+        lookup_time = datetime(2026, 3, 13, 1, 30, 0)
+        service._build_stock_payload = Mock(
+            return_value={
+                "code": "AAPL",
+                "name": "Apple",
+                "region": MarketRegion.US,
+                "sector": "Technology",
+                "current_price": 200.0,
+                "ideal_buy_price": 195.0,
+                "stop_loss": 180.0,
+                "take_profit": 225.0,
+                "scoring_data": Mock(),
+            }
+        )
+        service.scoring_engine.score_batch = Mock(
+            return_value=[
+                build_composite_score(
+                    code="AAPL",
+                    total_score=89.0,
+                    priority=RecommendationPriority.BUY_NOW,
+                )
+            ]
+        )
+
+        def _save_batch(items: list[StockRecommendation]):
+            rec = items[0]
+            rec_day = derive_recommendation_trading_day(
+                stock_code=rec.code,
+                updated_at=rec.updated_at,
+                region=rec.region,
+            )
+            return {(rec.code, rec_day): 92}
+
+        service.recommendation_repo.save_batch = Mock(side_effect=_save_batch)
+        service.analysis_result_service.save_recommendation_result = Mock(
+            return_value=SimpleNamespace(
+                analysis_id=999,
+                query_id="rec_AAPL_20260313_999",
+            )
+        )
+
+        with patch("src.services.recommendation_service.datetime") as datetime_cls:
+            datetime_cls.utcnow.return_value = lookup_time
+            result = service.refresh_stocks(["AAPL"], force=True)
+
+        self.assertEqual([item.code for item in result], ["AAPL"])
+        cast(
+            Mock, service.recommendation_repo.get_linked_recommendation_for_date
+        ).assert_not_called()
+        cast(Mock, service.analysis_result_service.get_by_id).assert_not_called()
+        save_kwargs = cast(
+            Mock, service.analysis_result_service.save_recommendation_result
+        ).call_args.kwargs
+        self.assertEqual(save_kwargs["recommendation_record_id"], 92)
+        cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        ).assert_called_once_with(
+            recommendation_record_id=92,
+            analysis_record_id=999,
+        )
+        self.assertNotEqual(existing_analysis_record_id, 999)
+
+    def test_refresh_stocks_reuses_same_day_linked_analysis_when_available(
+        self,
+    ) -> None:
+        config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
+        service = build_fast_service(config)
+
+        lookup_time = datetime(2026, 3, 13, 1, 30, 0)
+        expected_recommendation_day = derive_recommendation_trading_day(
+            stock_code="AAPL",
+            updated_at=lookup_time,
+            region=MarketRegion.US,
+        )
+
+        stale = Mock()
+        stale.code = "AAPL"
+        stale.updated_at = lookup_time - timedelta(seconds=900)
+        service.recommendation_repo.get_latest = Mock(return_value=stale)
+
+        linked_analysis_id = 4321
+        reused = StockRecommendation(
+            code="AAPL",
+            name="Apple",
+            region=MarketRegion.US,
+            sector="Technology",
+            current_price=200.0,
+            composite_score=build_composite_score(
+                code="AAPL",
+                total_score=83.0,
+                priority=RecommendationPriority.POSITION,
+            ),
+            ideal_buy_price=195.0,
+            stop_loss=180.0,
+            take_profit=225.0,
+            updated_at=lookup_time - timedelta(minutes=20),
+        )
+        service.recommendation_repo.get_linked_recommendation_for_date = Mock(
+            return_value=(reused, linked_analysis_id)
+        )
+        service.analysis_result_service.get_by_id = Mock(
+            return_value=SimpleNamespace(id=linked_analysis_id)
+        )
+        service._build_stock_payload = Mock()
+
+        with patch("src.services.recommendation_service.datetime") as datetime_cls:
+            datetime_cls.utcnow.return_value = lookup_time
+            result = service.refresh_stocks(["AAPL"], force=False)
+
+        self.assertEqual([item.code for item in result], ["AAPL"])
+        self.assertEqual(result[0].composite_score.total_score, 83.0)
+        cast(
+            Mock, service.recommendation_repo.get_linked_recommendation_for_date
+        ).assert_called_once_with("AAPL", expected_recommendation_day)
+        cast(Mock, service.analysis_result_service.get_by_id).assert_called_once_with(
+            linked_analysis_id
+        )
+        service._build_stock_payload.assert_not_called()
+        cast(Mock, service.recommendation_repo.save_batch).assert_not_called()
+        cast(
+            Mock, service.analysis_result_service.save_recommendation_result
+        ).assert_not_called()
+        cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        ).assert_not_called()
+
+    def test_refresh_stocks_cross_day_reuse_miss_creates_new_analysis(self) -> None:
+        config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
+        service = build_fast_service(config)
+
+        lookup_time = datetime(2026, 3, 13, 1, 30, 0)
+        expected_recommendation_day = derive_recommendation_trading_day(
+            stock_code="AAPL",
+            updated_at=lookup_time,
+            region=MarketRegion.US,
+        )
+
+        stale = Mock()
+        stale.code = "AAPL"
+        stale.updated_at = lookup_time - timedelta(days=2)
+        service.recommendation_repo.get_latest = Mock(return_value=stale)
+        service.recommendation_repo.get_linked_recommendation_for_date = Mock(
+            return_value=None
+        )
+
+        service._build_stock_payload = Mock(
+            return_value={
+                "code": "AAPL",
+                "name": "Apple",
+                "region": MarketRegion.US,
+                "sector": "Technology",
+                "current_price": 200.0,
+                "ideal_buy_price": 195.0,
+                "stop_loss": 180.0,
+                "take_profit": 225.0,
+                "scoring_data": Mock(),
+            }
+        )
+        service.scoring_engine.score_batch = Mock(
+            return_value=[
+                build_composite_score(
+                    code="AAPL",
+                    total_score=84.0,
+                    priority=RecommendationPriority.BUY_NOW,
+                )
+            ]
+        )
+
+        def _save_batch(items: list[StockRecommendation]):
+            rec = items[0]
+            rec_day = derive_recommendation_trading_day(
+                stock_code=rec.code,
+                updated_at=rec.updated_at,
+                region=rec.region,
+            )
+            return {(rec.code, rec_day): 91}
+
+        service.recommendation_repo.save_batch = Mock(side_effect=_save_batch)
+
+        with patch("src.services.recommendation_service.datetime") as datetime_cls:
+            datetime_cls.utcnow.return_value = lookup_time
+            result = service.refresh_stocks(["AAPL"], force=False)
+
+        self.assertEqual([item.code for item in result], ["AAPL"])
+        cast(
+            Mock, service.recommendation_repo.get_linked_recommendation_for_date
+        ).assert_called_once_with("AAPL", expected_recommendation_day)
+        service._build_stock_payload.assert_called_once()
+        save_kwargs = cast(
+            Mock, service.analysis_result_service.save_recommendation_result
+        ).call_args.kwargs
+        self.assertEqual(save_kwargs["recommendation_record_id"], 91)
+        cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        ).assert_called_once_with(
+            recommendation_record_id=91,
+            analysis_record_id=1,
+        )
+
+    def test_refresh_stocks_broken_same_day_link_falls_back_to_create_new(self) -> None:
+        config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
+        service = build_fast_service(config)
+
+        stale = Mock()
+        stale.code = "600519"
+        stale.updated_at = datetime.utcnow() - timedelta(seconds=900)
+        service.recommendation_repo.get_latest = Mock(return_value=stale)
+
+        linked_recommendation = StockRecommendation(
+            code="600519",
+            name="Moutai",
+            region=MarketRegion.CN,
+            sector="Liquor",
+            current_price=99.0,
+            composite_score=build_composite_score(
+                code="600519",
+                total_score=70.0,
+                priority=RecommendationPriority.WAIT_PULLBACK,
+            ),
+            ideal_buy_price=97.0,
+            stop_loss=92.0,
+            take_profit=108.0,
+            updated_at=datetime.utcnow() - timedelta(minutes=10),
+        )
+        service.recommendation_repo.get_linked_recommendation_for_date = Mock(
+            return_value=(linked_recommendation, 7788)
+        )
+        service.analysis_result_service.get_by_id = Mock(return_value=None)
+
+        service._build_stock_payload = Mock(
+            return_value={
+                "code": "600519",
+                "name": "Moutai",
+                "region": MarketRegion.CN,
+                "sector": "Liquor",
+                "current_price": 100.0,
+                "ideal_buy_price": 98.0,
+                "stop_loss": 93.0,
+                "take_profit": 110.0,
+                "scoring_data": Mock(),
+            }
+        )
+        service.scoring_engine.score_batch = Mock(
+            return_value=[
+                build_composite_score(
+                    code="600519",
+                    total_score=85.0,
+                    priority=RecommendationPriority.BUY_NOW,
+                )
+            ]
+        )
+
+        def _save_batch(items: list[StockRecommendation]):
+            rec = items[0]
+            rec_day = derive_recommendation_trading_day(
+                stock_code=rec.code,
+                updated_at=rec.updated_at,
+                region=rec.region,
+            )
+            return {(rec.code, rec_day): 77}
+
+        service.recommendation_repo.save_batch = Mock(side_effect=_save_batch)
+
+        with self.assertLogs(
+            "src.services.recommendation_service", level="WARNING"
+        ) as captured:
+            result = service.refresh_stocks(["600519"], force=False)
+
+        self.assertEqual([item.code for item in result], ["600519"])
+        self.assertEqual(result[0].composite_score.total_score, 85.0)
+        self.assertTrue(
+            any(
+                "Linked analysis missing during same-day reuse" in message
+                for message in captured.output
+            )
+        )
+        save_kwargs = cast(
+            Mock, service.analysis_result_service.save_recommendation_result
+        ).call_args.kwargs
+        self.assertEqual(save_kwargs["recommendation_record_id"], 77)
+
+    def test_force_refresh_bypass_policy_seam(self) -> None:
+        self.assertFalse(should_bypass_recommendation_reuse(force_refresh=False))
+        self.assertTrue(should_bypass_recommendation_reuse(force_refresh=True))
 
     def test_refresh_stocks_filters_codes_by_market_and_sector_scope(self) -> None:
         config = SimpleNamespace(max_workers=2)
@@ -937,9 +1237,12 @@ class RecommendationServiceTestCase(unittest.TestCase):
     ) -> None:
         config = SimpleNamespace(max_workers=2)
         service = build_fast_service(config)
-        recommendation_date = datetime.utcnow().date()
+        utc_day = datetime.utcnow().date()
         service.recommendation_repo.save_batch = Mock(
-            return_value={("600519", recommendation_date): 42}
+            return_value={
+                ("600519", utc_day): 42,
+                ("600519", utc_day + timedelta(days=1)): 42,
+            }
         )
         service._build_stock_payload = Mock(
             return_value={
@@ -974,30 +1277,164 @@ class RecommendationServiceTestCase(unittest.TestCase):
         items = service.refresh_stocks(["600519"], force=True)
 
         self.assertEqual([item.code for item in items], ["600519"])
-        session = getattr(service, "_test_db_session")
-        session.add_all.assert_called_once()
-        rows = session.add_all.call_args.args[0]
-        self.assertEqual(len(rows), 1)
-
-        row = rows[0]
-        self.assertEqual(
-            row.query_id,
-            f"rec_600519_{recommendation_date.strftime('%Y%m%d')}_42",
+        analysis_result_service = getattr(service, "_test_analysis_result_service")
+        analysis_result_service.save_recommendation_result.assert_called_once()
+        call_kwargs = (
+            analysis_result_service.save_recommendation_result.call_args.kwargs
         )
-        self.assertEqual(row.sentiment_score, 67)
-        self.assertEqual(row.operation_advice, "强烈买入")
-        self.assertEqual(row.trend_prediction, "看多")
-        self.assertEqual(row.analysis_summary, score.ai_summary)
-        self.assertEqual(row.ideal_buy, 98.0)
-        self.assertEqual(row.stop_loss, 93.0)
-        self.assertEqual(row.take_profit, 110.0)
-
-        raw_result = json.loads(row.raw_result)
-        self.assertEqual(raw_result.get("source"), "recommendation_refresh")
-        self.assertEqual(raw_result.get("data_sources"), "recommendation_refresh")
+        self.assertEqual(call_kwargs.get("recommendation_record_id"), 42)
+        recommendation = call_kwargs.get("recommendation")
+        self.assertIsNotNone(recommendation)
+        self.assertEqual(recommendation.code, "600519")
+        self.assertEqual(recommendation.name, "Moutai")
+        self.assertEqual(recommendation.ideal_buy_price, 98.0)
+        self.assertEqual(recommendation.stop_loss, 93.0)
+        self.assertEqual(recommendation.take_profit, 110.0)
         self.assertEqual(
-            raw_result.get("recommendation", {}).get("priority", {}).get("name"),
-            "BUY_NOW",
+            recommendation.composite_score.ai_summary,
+            "多头趋势延续，关注回踩后的低吸机会。",
+        )
+        update_analysis_record_link = cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        )
+        update_analysis_record_link.assert_called_once_with(
+            recommendation_record_id=42,
+            analysis_record_id=1,
+        )
+
+    def test_bridge_uses_market_local_day_for_saved_record_lookup(self) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        update_analysis_record_link = cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        )
+        update_analysis_record_link.reset_mock()
+
+        recommendation = StockRecommendation(
+            code="AAPL",
+            name="Apple",
+            region=MarketRegion.US,
+            sector="Technology",
+            current_price=200.0,
+            composite_score=build_composite_score(
+                code="AAPL",
+                total_score=82.0,
+                priority=RecommendationPriority.POSITION,
+            ),
+            ideal_buy_price=190.0,
+            stop_loss=180.0,
+            take_profit=224.0,
+            updated_at=datetime(2026, 3, 13, 1, 30, 0),
+        )
+        recommendation_day = derive_recommendation_trading_day(
+            stock_code=recommendation.code,
+            updated_at=recommendation.updated_at,
+            region=recommendation.region,
+        )
+
+        service._bridge_recommendations_to_analysis_history(
+            [recommendation],
+            saved_record_ids={(recommendation.code, recommendation_day): 88},
+        )
+
+        analysis_result_service = getattr(service, "_test_analysis_result_service")
+        call_kwargs = (
+            analysis_result_service.save_recommendation_result.call_args.kwargs
+        )
+        self.assertEqual(call_kwargs.get("recommendation_record_id"), 88)
+        update_analysis_record_link.assert_called_once_with(
+            recommendation_record_id=88,
+            analysis_record_id=1,
+        )
+
+    def test_bridge_skips_analysis_creation_when_record_id_missing(self) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        analysis_result_service = getattr(service, "_test_analysis_result_service")
+        update_analysis_record_link = cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        )
+
+        recommendation = StockRecommendation(
+            code="600519",
+            name="Moutai",
+            region=MarketRegion.CN,
+            sector="Liquor",
+            current_price=100.0,
+            composite_score=build_composite_score(
+                code="600519",
+                total_score=79.0,
+                priority=RecommendationPriority.POSITION,
+            ),
+            ideal_buy_price=98.0,
+            stop_loss=93.0,
+            take_profit=110.0,
+            updated_at=datetime(2026, 3, 21, 10, 0, 0),
+        )
+
+        with self.assertLogs(
+            "src.services.recommendation_service", level="WARNING"
+        ) as captured:
+            service._bridge_recommendations_to_analysis_history(
+                [recommendation],
+                saved_record_ids={},
+            )
+
+        analysis_result_service.save_recommendation_result.assert_not_called()
+        update_analysis_record_link.assert_not_called()
+        self.assertTrue(
+            any(
+                "missing persisted recommendation record id" in message
+                for message in captured.output
+            )
+        )
+
+    def test_bridge_logs_warning_when_link_write_fails(self) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        analysis_result_service = getattr(service, "_test_analysis_result_service")
+        update_analysis_record_link = cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        )
+        update_analysis_record_link.return_value = 0
+
+        recommendation = StockRecommendation(
+            code="600519",
+            name="Moutai",
+            region=MarketRegion.CN,
+            sector="Liquor",
+            current_price=100.0,
+            composite_score=build_composite_score(
+                code="600519",
+                total_score=79.0,
+                priority=RecommendationPriority.POSITION,
+            ),
+            ideal_buy_price=98.0,
+            stop_loss=93.0,
+            take_profit=110.0,
+            updated_at=datetime(2026, 3, 21, 10, 0, 0),
+        )
+        recommendation_day = derive_recommendation_trading_day(
+            stock_code=recommendation.code,
+            updated_at=recommendation.updated_at,
+            region=recommendation.region,
+        )
+
+        with self.assertLogs(
+            "src.services.recommendation_service", level="WARNING"
+        ) as captured:
+            service._bridge_recommendations_to_analysis_history(
+                [recommendation],
+                saved_record_ids={(recommendation.code, recommendation_day): 66},
+            )
+
+        analysis_result_service.save_recommendation_result.assert_called_once()
+        update_analysis_record_link.assert_called_once_with(
+            recommendation_record_id=66,
+            analysis_record_id=1,
+        )
+        self.assertTrue(
+            any(
+                "Failed to persist recommendation-analysis link" in message
+                for message in captured.output
+            )
         )
 
     def test_refresh_stocks_bridge_failure_logs_warning_without_blocking(self) -> None:
@@ -1027,8 +1464,10 @@ class RecommendationServiceTestCase(unittest.TestCase):
             ]
         )
 
-        session = getattr(service, "_test_db_session")
-        session.add_all.side_effect = RuntimeError("bridge write failed")
+        analysis_result_service = getattr(service, "_test_analysis_result_service")
+        analysis_result_service.save_recommendation_result.side_effect = RuntimeError(
+            "bridge write failed"
+        )
 
         with self.assertLogs(
             "src.services.recommendation_service", level="WARNING"
@@ -1037,6 +1476,10 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
         self.assertEqual(len(items), 1)
         service.recommendation_repo.save_batch.assert_called_once()
+        update_analysis_record_link = cast(
+            Mock, service.recommendation_repo.update_analysis_record_link
+        )
+        update_analysis_record_link.assert_not_called()
         self.assertTrue(
             any("analysis_history" in message for message in captured.output)
         )

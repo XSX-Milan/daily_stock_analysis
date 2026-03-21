@@ -12,6 +12,7 @@ from src.recommendation.models import (
     RecommendationPriority,
     StockRecommendation,
 )
+from src.recommendation.trading_day_policy import derive_recommendation_trading_day
 from src.repositories.recommendation_repo import RecommendationRepository
 from src.storage import DatabaseManager
 
@@ -103,6 +104,77 @@ class TestRecommendationRepository(unittest.TestCase):
         )
 
         self.assertEqual(self.repo.get_count(), 1)
+
+    def test_save_batch_uses_market_local_trading_day_identity(self) -> None:
+        cn_updated_at = datetime(2026, 3, 13, 2, 0, 0)
+        hk_updated_at = datetime(2026, 3, 13, 18, 30, 0)
+        us_updated_at = datetime(2026, 3, 13, 1, 30, 0)
+
+        saved = self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=90.0,
+                    updated_at=cn_updated_at,
+                ),
+                build_recommendation(
+                    "00700",
+                    name="Tencent",
+                    region=MarketRegion.HK,
+                    sector="Internet",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=80.0,
+                    updated_at=hk_updated_at,
+                ),
+                build_recommendation(
+                    "AAPL",
+                    name="Apple",
+                    region=MarketRegion.US,
+                    sector="Technology",
+                    priority=RecommendationPriority.POSITION,
+                    total_score=70.0,
+                    updated_at=us_updated_at,
+                ),
+            ]
+        )
+
+        cn_day = derive_recommendation_trading_day(
+            stock_code="600519",
+            updated_at=cn_updated_at,
+            region=MarketRegion.CN,
+        )
+        hk_day = derive_recommendation_trading_day(
+            stock_code="00700",
+            updated_at=hk_updated_at,
+            region=MarketRegion.HK,
+        )
+        us_day = derive_recommendation_trading_day(
+            stock_code="AAPL",
+            updated_at=us_updated_at,
+            region=MarketRegion.US,
+        )
+
+        self.assertIn(("600519", cn_day), saved)
+        self.assertIn(("00700", hk_day), saved)
+        self.assertIn(("AAPL", us_day), saved)
+
+        history_by_code = {
+            item["code"]: item
+            for item in self.repo.get_history_list(limit=10, offset=0)
+        }
+        self.assertEqual(
+            history_by_code["600519"]["recommendation_date"], cn_day.isoformat()
+        )
+        self.assertEqual(
+            history_by_code["00700"]["recommendation_date"], hk_day.isoformat()
+        )
+        self.assertEqual(
+            history_by_code["AAPL"]["recommendation_date"], us_day.isoformat()
+        )
 
     def test_get_list_and_get_count_apply_priority_sector_region_filters(self) -> None:
         now = datetime(2026, 3, 13, 9, 0, 0)
@@ -274,6 +346,7 @@ class TestRecommendationRepository(unittest.TestCase):
             {
                 "id",
                 "query_id",
+                "analysis_record_id",
                 "code",
                 "name",
                 "sector",
@@ -287,6 +360,7 @@ class TestRecommendationRepository(unittest.TestCase):
             },
         )
         self.assertEqual(first["query_id"], f"rec_AAPL_20260313_{first['id']}")
+        self.assertIsNone(first["analysis_record_id"])
         self.assertEqual(first["region"], "US")
         self.assertEqual(first["market"], "US")
         self.assertEqual(first["recommendation_date"], "2026-03-13")
@@ -298,6 +372,117 @@ class TestRecommendationRepository(unittest.TestCase):
         paged = self.repo.get_history_list(limit=1, offset=1)
         self.assertEqual(len(paged), 1)
         self.assertEqual(paged[0]["code"], "600519")
+
+    def test_update_analysis_record_link_persists_and_exposes_in_history(self) -> None:
+        updated_at = datetime(2026, 3, 13, 9, 0, 0)
+        saved_map = self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=88.0,
+                    updated_at=updated_at,
+                )
+            ]
+        )
+        recommendation_record_id = saved_map[("600519", updated_at.date())]
+
+        updated = self.repo.update_analysis_record_link(
+            recommendation_record_id=recommendation_record_id,
+            analysis_record_id=1234,
+        )
+
+        self.assertEqual(updated, 1)
+        item = self.repo.get_history_list(limit=1, offset=0)[0]
+        self.assertEqual(item["id"], recommendation_record_id)
+        self.assertEqual(item["analysis_record_id"], 1234)
+        self.assertEqual(
+            item["query_id"], f"rec_600519_20260313_{recommendation_record_id}"
+        )
+
+    def test_get_by_id_and_get_by_code_and_date_support_history_resolution(
+        self,
+    ) -> None:
+        updated_at = datetime(2026, 3, 13, 9, 0, 0)
+        saved_map = self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=88.0,
+                    updated_at=updated_at,
+                )
+            ]
+        )
+        ((identity, recommendation_record_id),) = saved_map.items()
+        saved_code, recommendation_date = identity
+
+        record_by_id = self.repo.get_by_id(recommendation_record_id)
+        self.assertIsNotNone(record_by_id)
+        assert record_by_id is not None
+        self.assertEqual(record_by_id.id, recommendation_record_id)
+        self.assertEqual(record_by_id.code, saved_code)
+        self.assertEqual(record_by_id.recommendation_date, recommendation_date)
+
+        record_by_code_date = self.repo.get_by_code_and_date(
+            saved_code,
+            recommendation_date,
+        )
+        self.assertIsNotNone(record_by_code_date)
+        assert record_by_code_date is not None
+        self.assertEqual(record_by_code_date.id, recommendation_record_id)
+
+        self.assertIsNone(self.repo.get_by_id(0))
+        self.assertIsNone(self.repo.get_by_code_and_date("", recommendation_date))
+
+    def test_get_linked_recommendation_for_date_requires_non_null_link(self) -> None:
+        updated_at = datetime(2026, 3, 13, 9, 0, 0)
+        saved_map = self.repo.save_batch(
+            [
+                build_recommendation(
+                    "600519",
+                    name="Moutai",
+                    region=MarketRegion.CN,
+                    sector="Liquor",
+                    priority=RecommendationPriority.BUY_NOW,
+                    total_score=88.0,
+                    updated_at=updated_at,
+                )
+            ]
+        )
+        recommendation_day = derive_recommendation_trading_day(
+            stock_code="600519",
+            updated_at=updated_at,
+            region=MarketRegion.CN,
+        )
+
+        self.assertIsNone(
+            self.repo.get_linked_recommendation_for_date("600519", recommendation_day)
+        )
+
+        recommendation_record_id = saved_map[("600519", recommendation_day)]
+        self.assertEqual(
+            self.repo.update_analysis_record_link(
+                recommendation_record_id=recommendation_record_id,
+                analysis_record_id=345,
+            ),
+            1,
+        )
+
+        linked = self.repo.get_linked_recommendation_for_date(
+            "600519", recommendation_day
+        )
+        self.assertIsNotNone(linked)
+        assert linked is not None
+        recommendation, analysis_record_id = linked
+        self.assertEqual(recommendation.code, "600519")
+        self.assertEqual(analysis_record_id, 345)
 
     def test_delete_by_stock_removes_all_rows_for_code(self) -> None:
         base_time = datetime(2026, 3, 13, 9, 0, 0)

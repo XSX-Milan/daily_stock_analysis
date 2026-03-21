@@ -10,8 +10,10 @@
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional, List, Dict, Any
+
+from sqlalchemy import desc, select
 
 from src.storage import DatabaseManager, AnalysisHistory
 
@@ -50,6 +52,45 @@ class AnalysisRepository:
         except Exception as e:
             logger.error(f"查询分析记录失败: {e}")
             return None
+
+    def get_by_id(self, analysis_id: int) -> Optional[AnalysisHistory]:
+        """根据主键 ID 获取分析记录"""
+        try:
+            return self.db.get_analysis_history_by_id(int(analysis_id))
+        except Exception as e:
+            logger.error(f"按 ID 查询分析记录失败: {e}")
+            return None
+
+    def get_latest_by_code_and_date(
+        self,
+        code: str,
+        target_date: date,
+        report_type: Optional[str] = None
+    ) -> Optional[AnalysisHistory]:
+        """获取指定股票在指定日期内最新的一条分析记录"""
+        normalized_code = str(code or "").strip()
+        if not normalized_code:
+            return None
+
+        day_start = datetime.combine(target_date, time.min)
+        day_end = day_start + timedelta(days=1)
+
+        with self.db.get_session() as session:
+            query = (
+                select(AnalysisHistory)
+                .where(
+                    AnalysisHistory.code == normalized_code,
+                    AnalysisHistory.created_at >= day_start,
+                    AnalysisHistory.created_at < day_end,
+                )
+                .order_by(desc(AnalysisHistory.created_at), desc(AnalysisHistory.id))
+                .limit(1)
+            )
+
+            if report_type is not None:
+                query = query.where(AnalysisHistory.report_type == str(report_type))
+
+            return session.execute(query).scalar_one_or_none()
     
     def get_list(
         self,

@@ -9,13 +9,16 @@ Responsibilities:
 2. Provide pagination and filtering functionality
 3. Generate detailed reports in Markdown format
 """
+
 from __future__ import annotations
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 
 from src.config import get_config, resolve_news_window_days
+from src.repositories.recommendation_repo import RecommendationRepository
 from src.report_language import (
     get_bias_status_emoji,
     get_localized_stock_name,
@@ -27,6 +30,7 @@ from src.report_language import (
     localize_trend_prediction,
     normalize_report_language,
 )
+from src.services.analysis_result_service import AnalysisResultService
 from src.storage import DatabaseManager
 from src.utils.data_processing import normalize_model_used, parse_json_field
 
@@ -39,7 +43,7 @@ logger = logging.getLogger(__name__)
 class MarkdownReportGenerationError(Exception):
     """Exception raised when Markdown report generation fails due to internal errors."""
 
-    def __init__(self, message: str, record_id: str = None):
+    def __init__(self, message: str, record_id: Optional[str] = None):
         self.message = message
         self.record_id = record_id
         super().__init__(self.message)
@@ -48,19 +52,111 @@ class MarkdownReportGenerationError(Exception):
 class HistoryService:
     """
     History Query Service
-    
+
     Encapsulates query logic for historical analysis records.
     """
-    
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+
+    def __init__(
+        self,
+        db_manager: Optional[DatabaseManager] = None,
+        recommendation_repo: Optional[RecommendationRepository] = None,
+        analysis_result_service: Optional[AnalysisResultService] = None,
+    ):
         """
         Initialize the history query service.
-        
+
         Args:
             db_manager: Database manager (optional, defaults to singleton instance)
         """
         self.db = db_manager or DatabaseManager.get_instance()
-    
+        self.recommendation_repo = recommendation_repo or RecommendationRepository(
+            self.db
+        )
+        self.analysis_result_service = analysis_result_service or AnalysisResultService(
+            db_manager=self.db
+        )
+
+    @staticmethod
+    def _parse_recommendation_query_id(
+        record_id: str,
+    ) -> Optional[Tuple[str, date, Optional[int]]]:
+        normalized_record_id = str(record_id or "").strip()
+        if not normalized_record_id.startswith("rec_"):
+            return None
+
+        matched = re.match(
+            r"^rec_(?P<code>.+?)_(?P<recommendation_date>\d{8})(?:_(?P<recommendation_record_id>\d+))?$",
+            normalized_record_id,
+        )
+        if not matched:
+            return None
+
+        code = str(matched.group("code") or "").strip()
+        if not code:
+            return None
+
+        recommendation_date_raw = str(
+            matched.group("recommendation_date") or ""
+        ).strip()
+        try:
+            recommendation_date = datetime.strptime(
+                recommendation_date_raw, "%Y%m%d"
+            ).date()
+        except ValueError:
+            return None
+
+        recommendation_record_id_raw = matched.group("recommendation_record_id")
+        recommendation_record_id: Optional[int]
+        if recommendation_record_id_raw is None:
+            recommendation_record_id = None
+        else:
+            try:
+                recommendation_record_id = int(recommendation_record_id_raw)
+            except ValueError:
+                return None
+            if recommendation_record_id <= 0:
+                return None
+
+        return code, recommendation_date, recommendation_record_id
+
+    def _resolve_recommendation_linked_record(self, record_id: str):
+        parsed = self._parse_recommendation_query_id(record_id)
+        if parsed is None:
+            return None
+
+        code, recommendation_date, recommendation_record_id = parsed
+
+        recommendation_record = None
+        if recommendation_record_id is not None:
+            recommendation_record = self.recommendation_repo.get_by_id(
+                recommendation_record_id
+            )
+        else:
+            recommendation_record = self.recommendation_repo.get_by_code_and_date(
+                code,
+                recommendation_date,
+            )
+
+        if recommendation_record is None:
+            return None
+
+        linked_analysis_id = getattr(recommendation_record, "analysis_record_id", None)
+        if linked_analysis_id is None:
+            return None
+
+        analysis_record = self.analysis_result_service.get_by_id(
+            int(linked_analysis_id)
+        )
+        if analysis_record is not None:
+            return analysis_record
+
+        logger.warning(
+            "history detail linked analysis missing: recommendation_id=%s analysis_id=%s",
+            getattr(recommendation_record, "id", None),
+            linked_analysis_id,
+        )
+        return None
+
     def get_history_list(
         self,
         stock_code: Optional[str] = None,
@@ -154,6 +250,11 @@ class HistoryService:
                 return record
         except (ValueError, TypeError):
             pass
+
+        recommendation_record = self._resolve_recommendation_linked_record(record_id)
+        if recommendation_record is not None:
+            return recommendation_record
+
         # Fall back to query_id lookup
         return self.db.get_latest_analysis_by_query_id(record_id)
 

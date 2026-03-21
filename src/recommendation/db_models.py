@@ -40,6 +40,7 @@ class RecommendationRecord(Base):
     take_profit = Column(Float)
     ai_refined = Column(Boolean, nullable=False, default=False)
     ai_summary = Column(Text)
+    analysis_record_id = Column(Integer, index=True)
     recommendation_date = Column(Date, nullable=False, default=date.today, index=True)
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(
@@ -72,6 +73,7 @@ class RecommendationRecord(Base):
             "take_profit": self.take_profit,
             "ai_refined": self.ai_refined,
             "ai_summary": self.ai_summary,
+            "analysis_record_id": self.analysis_record_id,
             "recommendation_date": recommendation_date.isoformat()
             if recommendation_date
             else None,

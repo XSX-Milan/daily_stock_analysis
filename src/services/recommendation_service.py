@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -28,44 +27,27 @@ from src.recommendation.sector_cache import SectorCacheService
 from src.recommendation.engine import ScoringEngine, StockScoringData
 from src.recommendation.market_utils import detect_market_region, get_market_indices
 from src.recommendation.models import (
-    CompositeScore,
-    DimensionScore,
     MarketRegion,
-    RecommendationPriority,
     ScoringWeights,
     SectorInfo,
     StockRecommendation,
+    WatchlistItem,
 )
-from src.repositories.recommendation_repo import RecommendationRepository
+from src.recommendation.trading_day_policy import (
+    derive_recommendation_trading_day,
+    should_bypass_recommendation_reuse,
+)
+from src.services.analysis_result_service import AnalysisResultService
+from src.services.history_service import HistoryService
 from src.services.sector_scanner_service import (
     SectorScannerService,
     _OVERSEAS_SECTOR_FALLBACK,
 )
 from src.services.watchlist_service import WatchlistService
 from src.stock_analyzer import TrendAnalysisResult, StockTrendAnalyzer
-from src.storage import AnalysisHistory, DatabaseManager, NewsIntel
+from src.storage import DatabaseManager, NewsIntel
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _RecommendationAnalysisBridgeResult:
-    code: str
-    name: str
-    sentiment_score: int
-    operation_advice: str
-    trend_prediction: str
-    analysis_summary: str
-    raw_payload: dict[str, Any]
-    sniper_points: dict[str, float | None]
-    data_sources: str = "recommendation_refresh"
-    raw_response: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return dict(self.raw_payload)
-
-    def get_sniper_points(self) -> dict[str, float | None]:
-        return dict(self.sniper_points)
 
 
 class RecommendationService:
@@ -86,7 +68,12 @@ class RecommendationService:
         ("risk", "RECOMMEND_WEIGHT_RISK", "recommend_weight_risk", 10),
     )
 
-    def __init__(self, config: Any = None) -> None:
+    def __init__(
+        self,
+        config: Any = None,
+        analysis_result_service: AnalysisResultService | None = None,
+        history_service: HistoryService | None = None,
+    ) -> None:
         self.config = config or get_config()
         self._recommendation_config_map = self._read_recommendation_config_map()
 
@@ -168,6 +155,14 @@ class RecommendationService:
             ),
         )
         self.db_manager = DatabaseManager.get_instance()
+        self.analysis_result_service = analysis_result_service or AnalysisResultService(
+            db_manager=self.db_manager
+        )
+        self.history_service = history_service or HistoryService(
+            db_manager=self.db_manager,
+            recommendation_repo=self.recommendation_repo,
+            analysis_result_service=self.analysis_result_service,
+        )
         self.sector_cache_ttl_hours = max(
             1,
             int(getattr(self.config, "recommendation_sector_cache_ttl_hours", 24)),
@@ -546,10 +541,14 @@ class RecommendationService:
 
         cached_by_code: dict[str, StockRecommendation] = {}
         codes_to_refresh = deduplicated_codes
-        if not force:
+        if not should_bypass_recommendation_reuse(force_refresh=force):
             cached_by_code, codes_to_refresh = self._split_recent_cached_codes(
                 deduplicated_codes
             )
+            same_day_reused_by_code, codes_to_refresh = (
+                self._split_same_day_linked_reuse_codes(codes_to_refresh)
+            )
+            cached_by_code.update(same_day_reused_by_code)
 
         if not codes_to_refresh:
             return self._sort_recommendations(
@@ -725,184 +724,48 @@ class RecommendationService:
             return
 
         saved_record_ids = saved_record_ids or {}
-        records: list[AnalysisHistory] = []
 
         for recommendation in recommendations:
-            bridge_result = self._build_analysis_bridge_result(recommendation)
-            recommendation_date = recommendation.updated_at.date()
+            recommendation_date = derive_recommendation_trading_day(
+                stock_code=recommendation.code,
+                updated_at=recommendation.updated_at,
+                region=recommendation.region,
+            )
             record_id = saved_record_ids.get((recommendation.code, recommendation_date))
-            if record_id is not None:
-                query_id = RecommendationRepository.build_history_query_id(
+            if record_id is None:
+                logger.warning(
+                    "Skip recommendation-analysis bridge due to missing persisted recommendation record id | code=%s recommendation_date=%s",
                     recommendation.code,
-                    recommendation_date,
+                    recommendation_date.isoformat(),
+                )
+                continue
+
+            analysis_identity = self.analysis_result_service.save_recommendation_result(
+                recommendation=recommendation,
+                recommendation_record_id=record_id,
+            )
+
+            analysis_record_id = int(analysis_identity.analysis_id)
+            if analysis_record_id <= 0:
+                logger.warning(
+                    "Skip recommendation-analysis link due to invalid analysis id | code=%s recommendation_record_id=%s analysis_record_id=%s",
+                    recommendation.code,
                     record_id,
+                    analysis_record_id,
                 )
-            else:
-                query_id = f"rec_{recommendation.code}_{recommendation_date.strftime('%Y%m%d')}"
-            sniper_points = self.db_manager._extract_sniper_points(bridge_result)
-            raw_result = self.db_manager._build_raw_result(bridge_result)
+                continue
 
-            records.append(
-                AnalysisHistory(
-                    query_id=query_id,
-                    code=bridge_result.code,
-                    name=bridge_result.name,
-                    report_type="recommendation",
-                    sentiment_score=bridge_result.sentiment_score,
-                    operation_advice=bridge_result.operation_advice,
-                    trend_prediction=bridge_result.trend_prediction,
-                    analysis_summary=bridge_result.analysis_summary,
-                    raw_result=self.db_manager._safe_json_dumps(raw_result),
-                    news_content=None,
-                    context_snapshot=None,
-                    ideal_buy=sniper_points.get("ideal_buy"),
-                    secondary_buy=sniper_points.get("secondary_buy"),
-                    stop_loss=sniper_points.get("stop_loss"),
-                    take_profit=sniper_points.get("take_profit"),
-                    created_at=datetime.now(),
+            updated_count = self.recommendation_repo.update_analysis_record_link(
+                recommendation_record_id=record_id,
+                analysis_record_id=analysis_record_id,
+            )
+            if updated_count <= 0:
+                logger.warning(
+                    "Failed to persist recommendation-analysis link | code=%s recommendation_record_id=%s analysis_record_id=%s",
+                    recommendation.code,
+                    record_id,
+                    analysis_record_id,
                 )
-            )
-
-        if not records:
-            return
-
-        with self.db_manager.session_scope() as session:
-            session.add_all(records)
-
-    def _build_analysis_bridge_result(
-        self,
-        recommendation: StockRecommendation,
-    ) -> _RecommendationAnalysisBridgeResult:
-        sentiment_score = self._extract_sentiment_score(
-            recommendation.composite_score,
-        )
-        operation_advice = self._map_operation_advice(recommendation.composite_score)
-        trend_prediction = self._derive_trend_prediction(recommendation.composite_score)
-        analysis_summary = str(recommendation.composite_score.ai_summary or "").strip()
-        if not analysis_summary:
-            analysis_summary = (
-                f"{operation_advice}，综合评分 {recommendation.composite_score.total_score:.2f}，"
-                f"趋势判断：{trend_prediction}。"
-            )
-
-        sniper_points = {
-            "ideal_buy": recommendation.ideal_buy_price,
-            "secondary_buy": None,
-            "stop_loss": recommendation.stop_loss,
-            "take_profit": recommendation.take_profit,
-        }
-
-        raw_payload = {
-            "source": "recommendation_refresh",
-            "code": recommendation.code,
-            "name": recommendation.name,
-            "region": recommendation.region.value,
-            "sector": recommendation.sector,
-            "current_price": recommendation.current_price,
-            "sentiment_score": sentiment_score,
-            "operation_advice": operation_advice,
-            "trend_prediction": trend_prediction,
-            "analysis_summary": analysis_summary,
-            "recommendation": {
-                "total_score": recommendation.composite_score.total_score,
-                "priority": {
-                    "name": recommendation.composite_score.priority.name,
-                    "label": recommendation.composite_score.priority.value,
-                },
-                "dimension_scores": self._serialize_dimension_scores(
-                    recommendation.composite_score.dimension_scores
-                ),
-                "ai_refined": bool(recommendation.composite_score.ai_refined),
-                "ai_summary": recommendation.composite_score.ai_summary,
-            },
-            "sniper_points": sniper_points,
-            "generated_at": (
-                recommendation.updated_at.isoformat()
-                if recommendation.updated_at
-                else datetime.utcnow().isoformat()
-            ),
-        }
-
-        return _RecommendationAnalysisBridgeResult(
-            code=recommendation.code,
-            name=recommendation.name,
-            sentiment_score=sentiment_score,
-            operation_advice=operation_advice,
-            trend_prediction=trend_prediction,
-            analysis_summary=analysis_summary,
-            raw_payload=raw_payload,
-            sniper_points=sniper_points,
-            raw_response={
-                "dashboard": {"battle_plan": {"sniper_points": sniper_points}}
-            },
-        )
-
-    @staticmethod
-    def _serialize_dimension_scores(
-        dimension_scores: list[DimensionScore],
-    ) -> list[dict[str, Any]]:
-        payload: list[dict[str, Any]] = []
-        for item in dimension_scores:
-            payload.append(
-                {
-                    "dimension": item.dimension,
-                    "score": item.score,
-                    "weight": item.weight,
-                    "details": item.details,
-                }
-            )
-        return payload
-
-    @staticmethod
-    def _extract_sentiment_score(composite_score: CompositeScore) -> int:
-        sentiment_dimension = next(
-            (
-                item
-                for item in composite_score.dimension_scores
-                if str(item.dimension).strip().casefold() == "sentiment"
-            ),
-            None,
-        )
-        if sentiment_dimension is None:
-            return 50
-
-        try:
-            value = float(sentiment_dimension.score)
-        except (TypeError, ValueError):
-            return 50
-        if pd.isna(value):
-            return 50
-        value = max(0.0, min(100.0, value))
-        return int(round(value))
-
-    @staticmethod
-    def _map_operation_advice(composite_score: CompositeScore) -> str:
-        mapping = {
-            RecommendationPriority.BUY_NOW: "强烈买入",
-            RecommendationPriority.POSITION: "建仓",
-            RecommendationPriority.WAIT_PULLBACK: "观望",
-            RecommendationPriority.NO_ENTRY: "回避",
-        }
-        return mapping.get(composite_score.priority, "观望")
-
-    @staticmethod
-    def _derive_trend_prediction(composite_score: CompositeScore) -> str:
-        summary = str(composite_score.ai_summary or "").strip().casefold()
-        if summary:
-            bearish_markers = ("看空", "下跌", "bearish", "strong sell", "sell")
-            bullish_markers = ("看多", "上涨", "bullish", "strong buy", "buy")
-            if any(marker in summary for marker in bearish_markers):
-                return "看空"
-            if any(marker in summary for marker in bullish_markers):
-                return "看多"
-
-        fallback = {
-            RecommendationPriority.BUY_NOW: "看多",
-            RecommendationPriority.POSITION: "偏多",
-            RecommendationPriority.WAIT_PULLBACK: "震荡",
-            RecommendationPriority.NO_ENTRY: "观望",
-        }
-        return fallback.get(composite_score.priority, "观望")
 
     def _select_score_first_inputs(
         self,
@@ -1054,6 +917,71 @@ class RecommendationService:
 
         return cached_by_code, codes_to_refresh
 
+    def _split_same_day_linked_reuse_codes(
+        self,
+        codes: list[str],
+    ) -> tuple[dict[str, StockRecommendation], list[str]]:
+        reused_by_code: dict[str, StockRecommendation] = {}
+        codes_to_refresh: list[str] = []
+        lookup_time = datetime.utcnow()
+
+        for code in codes:
+            recommendation_date = derive_recommendation_trading_day(
+                stock_code=code,
+                updated_at=lookup_time,
+            )
+
+            try:
+                linked_item = (
+                    self.recommendation_repo.get_linked_recommendation_for_date(
+                        code,
+                        recommendation_date,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed same-day recommendation reuse lookup; fallback to create-new | code=%s recommendation_date=%s error=%s",
+                    code,
+                    recommendation_date.isoformat(),
+                    exc,
+                )
+                codes_to_refresh.append(code)
+                continue
+
+            if linked_item is None:
+                codes_to_refresh.append(code)
+                continue
+
+            linked_recommendation, linked_analysis_id = linked_item
+            try:
+                linked_analysis = self.analysis_result_service.get_by_id(
+                    linked_analysis_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed linked analysis fetch during same-day reuse; fallback to create-new | code=%s recommendation_date=%s analysis_record_id=%s error=%s",
+                    code,
+                    recommendation_date.isoformat(),
+                    linked_analysis_id,
+                    exc,
+                )
+                codes_to_refresh.append(code)
+                continue
+
+            if linked_analysis is None:
+                logger.warning(
+                    "Linked analysis missing during same-day reuse; fallback to create-new | code=%s recommendation_date=%s analysis_record_id=%s",
+                    code,
+                    recommendation_date.isoformat(),
+                    linked_analysis_id,
+                )
+                codes_to_refresh.append(code)
+                continue
+
+            reused_by_code[code] = linked_recommendation
+
+        return reused_by_code, codes_to_refresh
+
     @staticmethod
     def _sort_recommendations(
         recommendations: list[StockRecommendation],
@@ -1156,6 +1084,295 @@ class RecommendationService:
     def get_priority_summary(self) -> dict[str, int]:
         """Return recommendation counts grouped by priority."""
         return self.recommendation_repo.get_priority_counts()
+
+    def get_recommendation_history(
+        self,
+        market: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        items = self.recommendation_repo.get_history_list(
+            market=market,
+            limit=limit,
+            offset=offset,
+        )
+        total = self.recommendation_repo.get_count(region=market)
+        return items, total
+
+    def get_analysis_record_id_for_recommendation(
+        self,
+        recommendation: StockRecommendation,
+    ) -> int | None:
+        recommendation_date = derive_recommendation_trading_day(
+            stock_code=recommendation.code,
+            updated_at=recommendation.updated_at,
+            region=recommendation.region,
+        )
+        recommendation_row = self.recommendation_repo.get_by_code_and_date(
+            code=recommendation.code,
+            recommendation_date=recommendation_date,
+        )
+        if recommendation_row is None:
+            return None
+
+        raw_analysis_record_id = getattr(recommendation_row, "analysis_record_id", None)
+        if raw_analysis_record_id is None:
+            return None
+
+        try:
+            normalized_analysis_record_id = int(raw_analysis_record_id)
+        except (TypeError, ValueError):
+            return None
+
+        if normalized_analysis_record_id <= 0:
+            return None
+        return normalized_analysis_record_id
+
+    def get_recommendation_detail(
+        self,
+        recommendation_record_id: int,
+    ) -> dict[str, Any] | None:
+        recommendation_row = self.recommendation_repo.get_by_id(
+            recommendation_record_id
+        )
+        if recommendation_row is None:
+            return None
+
+        recommendation_item = self._serialize_recommendation_record(recommendation_row)
+        analysis_detail = self._resolve_recommendation_analysis_detail(
+            recommendation_item=recommendation_item
+        )
+        return {
+            "recommendation": recommendation_item,
+            "analysis_detail": analysis_detail,
+        }
+
+    def _resolve_recommendation_analysis_detail(
+        self,
+        recommendation_item: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        analysis_record_id = recommendation_item.get("analysis_record_id")
+        normalized_analysis_record_id: int | None = None
+        if analysis_record_id is not None:
+            try:
+                parsed_analysis_record_id = int(analysis_record_id)
+            except (TypeError, ValueError):
+                parsed_analysis_record_id = 0
+            if parsed_analysis_record_id > 0:
+                normalized_analysis_record_id = parsed_analysis_record_id
+
+        if normalized_analysis_record_id is not None:
+            try:
+                detail_by_analysis_id = self.history_service.get_history_detail_by_id(
+                    normalized_analysis_record_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to resolve recommendation analysis by explicit analysis_record_id; fallback to legacy query_id | analysis_record_id=%s error=%s",
+                    normalized_analysis_record_id,
+                    exc,
+                )
+                detail_by_analysis_id = None
+            if detail_by_analysis_id is not None:
+                return detail_by_analysis_id
+
+        query_id = str(recommendation_item.get("query_id") or "").strip()
+        if not query_id:
+            return None
+        return self.history_service.resolve_and_get_detail(query_id)
+
+    def _serialize_recommendation_record(
+        self,
+        recommendation_row: Any,
+    ) -> dict[str, Any]:
+        recommendation_record_id = int(getattr(recommendation_row, "id"))
+        recommendation_code = str(getattr(recommendation_row, "code", "") or "").strip()
+        recommendation_name = str(getattr(recommendation_row, "name", "") or "").strip()
+        recommendation_sector = getattr(recommendation_row, "sector", None)
+        recommendation_score = float(
+            getattr(recommendation_row, "total_score", 0.0) or 0.0
+        )
+        recommendation_priority = str(
+            getattr(recommendation_row, "priority", "") or ""
+        ).strip()
+
+        recommendation_date = getattr(recommendation_row, "recommendation_date", None)
+        updated_at = getattr(recommendation_row, "updated_at", None)
+        region = str(getattr(recommendation_row, "region", "") or "").strip()
+
+        query_id: str | None = None
+        if recommendation_date is not None:
+            query_id = self.recommendation_repo.build_history_query_id(
+                code=recommendation_code,
+                recommendation_date=recommendation_date,
+                record_id=recommendation_record_id,
+            )
+
+        raw_analysis_record_id = getattr(recommendation_row, "analysis_record_id", None)
+        analysis_record_id: int | None
+        if raw_analysis_record_id is None:
+            analysis_record_id = None
+        else:
+            try:
+                normalized_analysis_record_id = int(raw_analysis_record_id)
+            except (TypeError, ValueError):
+                normalized_analysis_record_id = 0
+            analysis_record_id = (
+                normalized_analysis_record_id
+                if normalized_analysis_record_id > 0
+                else None
+            )
+
+        return {
+            "id": recommendation_record_id,
+            "query_id": query_id,
+            "analysis_record_id": analysis_record_id,
+            "code": recommendation_code,
+            "name": recommendation_name,
+            "sector": str(recommendation_sector).strip()
+            if recommendation_sector is not None
+            else None,
+            "composite_score": recommendation_score,
+            "priority": recommendation_priority,
+            "recommendation_date": recommendation_date.isoformat()
+            if recommendation_date is not None
+            else None,
+            "updated_at": updated_at.isoformat() if updated_at is not None else None,
+            "ai_summary": getattr(recommendation_row, "ai_summary", None),
+            "region": region,
+            "market": region,
+        }
+
+    def delete_recommendation_history(self, record_ids: list[int]) -> int:
+        return self.recommendation_repo.delete_by_ids(record_ids)
+
+    def get_hot_sectors(
+        self,
+        market: str | MarketRegion | None = "CN",
+    ) -> list[dict[str, Any]]:
+        target_market = self._normalize_market_code(market)
+        if target_market not in {"CN", "HK", "US"}:
+            raise ValueError(f"Unsupported market: {target_market}")
+
+        if target_market in {"HK", "US"}:
+            fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
+            return [
+                {
+                    "name": name,
+                    "change_pct": None,
+                    "stock_count": len(codes),
+                }
+                for name, codes in fallback.items()
+            ]
+
+        scanned: list[tuple[str, list[str]]] = []
+        try:
+            scanned = self.sector_scanner_service.scan_sectors() or []
+        except Exception as exc:
+            logger.warning("Failed to scan CN hot sectors: %s", exc)
+
+        change_pct_by_sector: dict[str, float] = {}
+        ranking_sector_names: list[str] = []
+        ranking_sector_keys: set[str] = set()
+        fetcher = getattr(self.sector_scanner_service, "data_fetcher", None)
+        try:
+            top_sectors, _ = (
+                fetcher.get_sector_rankings(3) if fetcher is not None else ([], [])
+            )
+            for item in top_sectors or []:
+                name = self._extract_sector_name(item)
+                if not name:
+                    continue
+
+                normalized_name = self._normalize_sector_name(name)
+                if not normalized_name:
+                    continue
+
+                if normalized_name not in ranking_sector_keys:
+                    ranking_sector_names.append(name)
+                    ranking_sector_keys.add(normalized_name)
+
+                change_pct = self._extract_sector_change_pct(item)
+                if change_pct is not None:
+                    change_pct_by_sector[normalized_name] = change_pct
+        except Exception as exc:
+            logger.warning("Failed to fetch CN sector rankings: %s", exc)
+
+        sectors: list[dict[str, Any]] = []
+        if scanned:
+            for sector_name, stock_codes in scanned[:3]:
+                name = str(sector_name or "").strip()
+                if not name:
+                    continue
+                stock_count = (
+                    len(stock_codes) if isinstance(stock_codes, list) else None
+                )
+                sectors.append(
+                    {
+                        "name": name,
+                        "stock_count": stock_count,
+                        "change_pct": change_pct_by_sector.get(
+                            self._normalize_sector_name(name)
+                        ),
+                    }
+                )
+        else:
+            for name in ranking_sector_names[:3]:
+                sectors.append(
+                    {
+                        "name": name,
+                        "stock_count": None,
+                        "change_pct": change_pct_by_sector.get(
+                            self._normalize_sector_name(name)
+                        ),
+                    }
+                )
+
+        return sectors
+
+    def get_watchlist_items(
+        self,
+        region: str | MarketRegion | None = None,
+    ) -> list[WatchlistItem]:
+        return self.watchlist_service.get_watchlist(region=region)
+
+    def add_watchlist_stock(
+        self,
+        code: str,
+        name: str,
+        region: str | MarketRegion | None = None,
+    ) -> WatchlistItem:
+        return self.watchlist_service.add_stock(code=code, name=name, region=region)
+
+    def remove_watchlist_stock(self, code: str) -> bool:
+        return self.watchlist_service.remove_stock(code)
+
+    @staticmethod
+    def _normalize_market_code(value: str | MarketRegion | None) -> str:
+        resolved = getattr(value, "value", value)
+        return str(resolved or "CN").strip().upper() or "CN"
+
+    @staticmethod
+    def _normalize_sector_name(value: object) -> str:
+        return "".join(str(value or "").strip().casefold().split())
+
+    @staticmethod
+    def _extract_sector_name(item: object) -> str:
+        if isinstance(item, dict):
+            return str(item.get("name") or item.get("sector") or "").strip()
+        return str(item or "").strip()
+
+    @staticmethod
+    def _extract_sector_change_pct(item: object) -> float | None:
+        if not isinstance(item, dict):
+            return None
+        raw_change = item.get("change_pct")
+        if raw_change is None:
+            return None
+        try:
+            return float(raw_change)
+        except (TypeError, ValueError):
+            return None
 
     def get_scoring_weights(self) -> ScoringWeights:
         """Return the currently active scoring weights."""

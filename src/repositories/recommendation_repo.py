@@ -18,6 +18,7 @@ from src.recommendation.models import (
     SectorInfo,
     StockRecommendation,
 )
+from src.recommendation.trading_day_policy import derive_recommendation_trading_day
 from src.storage import DatabaseManager
 
 
@@ -48,7 +49,11 @@ class RecommendationRepository:
 
         with self.db.session_scope() as session:
             for rec in recs:
-                record_date = rec.updated_at.date()
+                record_date = derive_recommendation_trading_day(
+                    stock_code=rec.code,
+                    updated_at=rec.updated_at,
+                    region=rec.region,
+                )
                 existing = session.execute(
                     select(RecommendationRecord).where(
                         RecommendationRecord.code == rec.code,
@@ -56,7 +61,7 @@ class RecommendationRepository:
                     )
                 ).scalar_one_or_none()
 
-                payload = self._to_record_payload(rec)
+                payload = self._to_record_payload(rec, recommendation_date=record_date)
                 if existing is None:
                     existing = RecommendationRecord(**payload)
                     session.add(existing)
@@ -68,6 +73,40 @@ class RecommendationRepository:
                 saved_record_ids[(rec.code, record_date)] = int(cast(int, existing.id))
 
         return saved_record_ids
+
+    def update_analysis_record_link(
+        self,
+        recommendation_record_id: int,
+        analysis_record_id: int | None,
+    ) -> int:
+        try:
+            normalized_recommendation_record_id = int(recommendation_record_id)
+        except (TypeError, ValueError):
+            return 0
+
+        if normalized_recommendation_record_id <= 0:
+            return 0
+
+        normalized_analysis_record_id: int | None
+        if analysis_record_id is None:
+            normalized_analysis_record_id = None
+        else:
+            try:
+                normalized_analysis_record_id = int(analysis_record_id)
+            except (TypeError, ValueError):
+                return 0
+            if normalized_analysis_record_id <= 0:
+                return 0
+
+        with self.db.session_scope() as session:
+            result = session.execute(
+                update(RecommendationRecord)
+                .where(RecommendationRecord.id == normalized_recommendation_record_id)
+                .values(analysis_record_id=normalized_analysis_record_id)
+            )
+            updated_count = getattr(result, "rowcount", 0) or 0
+
+        return int(updated_count)
 
     def get_latest(self, code: str) -> StockRecommendation | None:
         """Return the latest recommendation for one stock code."""
@@ -86,6 +125,78 @@ class RecommendationRepository:
                 return None
 
             return self._to_domain(record)
+
+    def get_by_id(self, recommendation_record_id: int) -> RecommendationRecord | None:
+        try:
+            normalized_id = int(recommendation_record_id)
+        except (TypeError, ValueError):
+            return None
+
+        if normalized_id <= 0:
+            return None
+
+        with self.db.get_session() as session:
+            return session.execute(
+                select(RecommendationRecord).where(
+                    RecommendationRecord.id == normalized_id
+                )
+            ).scalar_one_or_none()
+
+    def get_by_code_and_date(
+        self,
+        code: str,
+        recommendation_date: date,
+    ) -> RecommendationRecord | None:
+        normalized_code = str(code).strip()
+        if not normalized_code:
+            return None
+
+        with self.db.get_session() as session:
+            return session.execute(
+                select(RecommendationRecord)
+                .where(
+                    RecommendationRecord.code == normalized_code,
+                    RecommendationRecord.recommendation_date == recommendation_date,
+                )
+                .order_by(
+                    desc(RecommendationRecord.updated_at),
+                    desc(RecommendationRecord.id),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+
+    def get_linked_recommendation_for_date(
+        self,
+        code: str,
+        recommendation_date: date,
+    ) -> tuple[StockRecommendation, int] | None:
+        normalized_code = str(code).strip()
+        if not normalized_code:
+            return None
+
+        with self.db.session_scope() as session:
+            record = session.execute(
+                select(RecommendationRecord)
+                .where(
+                    RecommendationRecord.code == normalized_code,
+                    RecommendationRecord.recommendation_date == recommendation_date,
+                    RecommendationRecord.analysis_record_id.is_not(None),
+                )
+                .order_by(
+                    desc(RecommendationRecord.updated_at),
+                    desc(RecommendationRecord.id),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+
+            if record is None:
+                return None
+
+            linked_analysis_id = cast(int | None, record.analysis_record_id)
+            if linked_analysis_id is None:
+                return None
+
+            return self._to_domain(record), int(linked_analysis_id)
 
     def get_list(
         self,
@@ -155,6 +266,11 @@ class RecommendationRepository:
                     {
                         "id": int(cast(int, record.id)),
                         "query_id": query_id,
+                        "analysis_record_id": (
+                            int(cast(int, record.analysis_record_id))
+                            if record.analysis_record_id is not None
+                            else None
+                        ),
                         "code": cast(str, record.code),
                         "name": cast(str, record.name),
                         "sector": cast(str | None, record.sector),
@@ -395,7 +511,10 @@ class RecommendationRepository:
             return normalized_key
 
     @staticmethod
-    def _to_record_payload(rec: StockRecommendation) -> dict[str, Any]:
+    def _to_record_payload(
+        rec: StockRecommendation,
+        recommendation_date: date,
+    ) -> dict[str, Any]:
         return {
             "code": rec.code,
             "name": rec.name,
@@ -414,7 +533,7 @@ class RecommendationRepository:
             "take_profit": rec.take_profit,
             "ai_refined": rec.composite_score.ai_refined,
             "ai_summary": rec.composite_score.ai_summary,
-            "recommendation_date": rec.updated_at.date(),
+            "recommendation_date": recommendation_date,
             "updated_at": rec.updated_at,
         }
 
@@ -452,7 +571,7 @@ class RecommendationRepository:
             ai_summary=cast(str | None, record.ai_summary),
         )
 
-        return StockRecommendation(
+        recommendation = StockRecommendation(
             code=cast(str, record.code),
             name=cast(str, record.name),
             region=MarketRegion(cast(str, record.region)),
@@ -464,6 +583,13 @@ class RecommendationRepository:
             take_profit=cast(float | None, record.take_profit),
             updated_at=updated_at,
         )
+        setattr(recommendation, "record_id", cast(int | None, record.id))
+        setattr(
+            recommendation,
+            "analysis_record_id",
+            cast(int | None, record.analysis_record_id),
+        )
+        return recommendation
 
     @staticmethod
     def _priority_from_storage(value: str) -> RecommendationPriority:

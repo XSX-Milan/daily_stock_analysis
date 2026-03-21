@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.recommendation import (
+    RecommendationDetailResponse,
     RecommendationHistoryDeleteRequest,
+    RecommendationHistoryDetailResponse,
     RecommendationHistoryFiltersResponse,
     RecommendationHistoryItemResponse,
     RecommendationHistoryListResponse,
@@ -26,7 +29,6 @@ from src.recommendation.models import (
     RecommendationPriority,
     StockRecommendation,
 )
-from src.services.sector_scanner_service import _OVERSEAS_SECTOR_FALLBACK
 from src.services.recommendation_service import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -74,29 +76,10 @@ def _normalize_market_code(market: str | None) -> str:
     return str(market or "CN").strip().upper() or "CN"
 
 
-def _normalize_sector_name(value: object) -> str:
-    return "".join(str(value or "").strip().casefold().split())
-
-
-def _extract_sector_name(item: object) -> str:
-    if isinstance(item, dict):
-        return str(item.get("name") or item.get("sector") or "").strip()
-    return str(item or "").strip()
-
-
-def _extract_sector_change_pct(item: object) -> float | None:
-    if not isinstance(item, dict):
-        return None
-    raw_change = item.get("change_pct")
-    if raw_change is None:
-        return None
-    try:
-        return float(raw_change)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_recommendation_response(item: StockRecommendation) -> RecommendationResponse:
+def _to_recommendation_response(
+    item: StockRecommendation,
+    service: RecommendationService,
+) -> RecommendationResponse:
     """Convert one domain recommendation object into API response schema."""
     composite_score = getattr(item, "composite_score", None)
     dimension_scores = getattr(composite_score, "dimension_scores", []) or []
@@ -126,6 +109,23 @@ def _to_recommendation_response(item: StockRecommendation) -> RecommendationResp
     total_score = float(getattr(composite_score, "total_score", 0.0) or 0.0)
     ai_refined = bool(getattr(composite_score, "ai_refined", False))
     ai_summary = getattr(composite_score, "ai_summary", None)
+    raw_analysis_record_id = getattr(item, "analysis_record_id", None)
+    try:
+        analysis_record_id = (
+            int(raw_analysis_record_id) if raw_analysis_record_id is not None else None
+        )
+    except (TypeError, ValueError):
+        analysis_record_id = None
+    if analysis_record_id is None:
+        try:
+            analysis_record_id = service.get_analysis_record_id_for_recommendation(item)
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve analysis_record_id for recommendation item; fallback to null | code=%s error=%s",
+                getattr(item, "code", None),
+                exc,
+            )
+            analysis_record_id = None
 
     current_price = getattr(item, "current_price", None)
     suggested_buy = getattr(item, "ideal_buy_price", None)
@@ -150,8 +150,16 @@ def _to_recommendation_response(item: StockRecommendation) -> RecommendationResp
         take_profit=take_profit,
         ai_refined=ai_refined,
         ai_summary=str(ai_summary) if ai_summary is not None else None,
+        analysis_record_id=analysis_record_id,
         updated_at=item.updated_at,
     )
+
+
+def _build_recommendation_detail_payload(detail: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recommendation": RecommendationHistoryItemResponse(**detail["recommendation"]),
+        "analysis_detail": detail.get("analysis_detail"),
+    }
 
 
 @router.post(
@@ -182,7 +190,7 @@ def refresh_recommendations(
                 force=request.force, market=market, sector=sector
             )
         return RecommendationListResponse(
-            items=[_to_recommendation_response(item) for item in items],
+            items=[_to_recommendation_response(item, service) for item in items],
             total=len(items),
             filters={
                 "stock_codes": request.stock_codes,
@@ -235,7 +243,7 @@ def refresh_single_recommendation(
                     "message": f"No recommendation generated for {stock_code}",
                 },
             )
-        return _to_recommendation_response(items[0])
+        return _to_recommendation_response(items[0], service)
     except HTTPException:
         raise
     except Exception as exc:
@@ -279,7 +287,7 @@ def get_recommendation_list(
             total = len(items)
 
         return RecommendationListResponse(
-            items=[_to_recommendation_response(item) for item in items],
+            items=[_to_recommendation_response(item, service) for item in items],
             total=total,
             filters={"priority": priority, "sector": sector, "market": market},
         )
@@ -310,12 +318,11 @@ def get_recommendation_history_list(
     service: RecommendationService = Depends(get_recommendation_service),
 ) -> RecommendationHistoryListResponse:
     try:
-        items = service.recommendation_repo.get_history_list(
+        items, total = service.get_recommendation_history(
             market=market,
             limit=limit,
             offset=offset,
         )
-        total = service.recommendation_repo.get_count(region=market)
         return RecommendationHistoryListResponse(
             items=[RecommendationHistoryItemResponse(**item) for item in items],
             total=total,
@@ -336,6 +343,101 @@ def get_recommendation_history_list(
         )
 
 
+@router.get(
+    "/detail/{record_id}",
+    response_model=RecommendationDetailResponse,
+    responses={
+        200: {"description": "Recommendation detail"},
+        404: {"description": "Recommendation not found", "model": ErrorResponse},
+        500: {"description": "Internal server error", "model": ErrorResponse},
+    },
+    summary="Get recommendation detail",
+)
+def get_recommendation_detail(
+    record_id: int,
+    service: RecommendationService = Depends(get_recommendation_service),
+) -> RecommendationDetailResponse:
+    try:
+        detail = service.get_recommendation_detail(record_id)
+        if detail is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "not_found",
+                    "message": f"Recommendation {record_id} not found",
+                },
+            )
+
+        return RecommendationDetailResponse(
+            **_build_recommendation_detail_payload(detail)
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to query recommendation detail for record_id=%s: %s",
+            record_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"Failed to query recommendation detail: {str(exc)}",
+            },
+        )
+
+
+@router.get(
+    "/history/{record_id}",
+    response_model=RecommendationHistoryDetailResponse,
+    responses={
+        200: {"description": "Recommendation history detail"},
+        404: {
+            "description": "Recommendation history not found",
+            "model": ErrorResponse,
+        },
+        500: {"description": "Internal server error", "model": ErrorResponse},
+    },
+    summary="Get recommendation history detail",
+)
+def get_recommendation_history_detail(
+    record_id: int,
+    service: RecommendationService = Depends(get_recommendation_service),
+) -> RecommendationHistoryDetailResponse:
+    try:
+        detail = service.get_recommendation_detail(record_id)
+        if detail is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "not_found",
+                    "message": f"Recommendation history {record_id} not found",
+                },
+            )
+
+        return RecommendationHistoryDetailResponse(
+            **_build_recommendation_detail_payload(detail)
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Failed to query recommendation history detail for record_id=%s: %s",
+            record_id,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"Failed to query recommendation history detail: {str(exc)}",
+            },
+        )
+
+
 @router.delete(
     "/history",
     responses={
@@ -351,7 +453,7 @@ def delete_recommendation_history(
     service: RecommendationService = Depends(get_recommendation_service),
 ) -> dict[str, int | str]:
     try:
-        deleted = service.recommendation_repo.delete_by_ids(request.record_ids)
+        deleted = service.delete_recommendation_history(request.record_ids)
         return {"status": "ok", "deleted": deleted}
     except Exception as exc:
         logger.error(
@@ -431,72 +533,17 @@ def get_hot_sectors(
             },
         )
 
-    if target_market in {"HK", "US"}:
-        fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
-        sectors = [
-            HotSectorItemResponse(name=name, change_pct=None, stock_count=len(codes))
-            for name, codes in fallback.items()
+    sectors = service.get_hot_sectors(target_market)
+    return HotSectorListResponse(
+        sectors=[
+            HotSectorItemResponse(
+                name=str(item.get("name") or ""),
+                change_pct=item.get("change_pct"),
+                stock_count=item.get("stock_count"),
+            )
+            for item in sectors
         ]
-        return HotSectorListResponse(sectors=sectors)
-
-    scanned: list[tuple[str, list[str]]] = []
-    try:
-        scanned = service.sector_scanner_service.scan_sectors() or []
-    except Exception as exc:
-        logger.warning("Failed to scan CN hot sectors: %s", exc)
-
-    change_pct_by_sector: dict[str, float] = {}
-    ranking_sector_names: list[str] = []
-    ranking_sector_keys: set[str] = set()
-    fetcher = getattr(service.sector_scanner_service, "data_fetcher", None)
-    try:
-        top_sectors, _ = (
-            fetcher.get_sector_rankings(3) if fetcher is not None else ([], [])
-        )
-        for item in top_sectors or []:
-            name = _extract_sector_name(item)
-            if not name:
-                continue
-
-            normalized_name = _normalize_sector_name(name)
-            if not normalized_name:
-                continue
-
-            if normalized_name not in ranking_sector_keys:
-                ranking_sector_names.append(name)
-                ranking_sector_keys.add(normalized_name)
-
-            change_pct = _extract_sector_change_pct(item)
-            if change_pct is not None:
-                change_pct_by_sector[normalized_name] = change_pct
-    except Exception as exc:
-        logger.warning("Failed to fetch CN sector rankings: %s", exc)
-
-    sectors: list[HotSectorItemResponse] = []
-    if scanned:
-        for sector_name, stock_codes in scanned[:3]:
-            name = str(sector_name or "").strip()
-            if not name:
-                continue
-            stock_count = len(stock_codes) if isinstance(stock_codes, list) else None
-            sectors.append(
-                HotSectorItemResponse(
-                    name=name,
-                    stock_count=stock_count,
-                    change_pct=change_pct_by_sector.get(_normalize_sector_name(name)),
-                )
-            )
-    else:
-        for name in ranking_sector_names[:3]:
-            sectors.append(
-                HotSectorItemResponse(
-                    name=name,
-                    stock_count=None,
-                    change_pct=change_pct_by_sector.get(_normalize_sector_name(name)),
-                )
-            )
-
-    return HotSectorListResponse(sectors=sectors)
+    )
 
 
 @router.get(
@@ -514,7 +561,7 @@ def get_watchlist(
 ) -> list[WatchlistItemResponse]:
     """Return watchlist items, optionally filtered by market."""
     try:
-        items = service.watchlist_service.get_watchlist(region=market)
+        items = service.get_watchlist_items(region=market)
         return [
             WatchlistItemResponse(
                 code=item.code,
@@ -551,7 +598,7 @@ def add_watchlist_stock(
 ) -> WatchlistItemResponse:
     """Add one stock to watchlist and return the stored item."""
     try:
-        item = service.watchlist_service.add_stock(
+        item = service.add_watchlist_stock(
             code=request.code,
             name=request.name,
             region=request.region,
@@ -593,7 +640,7 @@ def remove_watchlist_stock(
 ) -> dict[str, str]:
     """Remove one stock from watchlist by code."""
     try:
-        removed = service.watchlist_service.remove_stock(code)
+        removed = service.remove_watchlist_stock(code)
         if not removed:
             raise HTTPException(
                 status_code=404,

@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from api.v1.schemas.history import AnalysisReport
+
 
 class RecommendationResponse(BaseModel):
     """Response schema for one stock recommendation item."""
@@ -33,6 +35,9 @@ class RecommendationResponse(BaseModel):
     take_profit: float | None = Field(None, description="Take profit price")
     ai_refined: bool = Field(False, description="Whether AI refinement adjusted score")
     ai_summary: str | None = Field(None, description="Optional AI refinement summary")
+    analysis_record_id: int | None = Field(
+        None, description="Linked analysis history record ID"
+    )
     updated_at: datetime = Field(..., description="Last update timestamp")
 
 
@@ -53,6 +58,9 @@ class RecommendationHistoryFiltersResponse(BaseModel):
 class RecommendationHistoryItemResponse(BaseModel):
     id: int = Field(..., ge=1, description="Recommendation record ID")
     query_id: str | None = Field(None, description="Linked analysis history query ID")
+    analysis_record_id: int | None = Field(
+        None, description="Linked analysis history record ID"
+    )
     code: str = Field(..., description="Stock code")
     name: str = Field(..., description="Stock name")
     sector: str | None = Field(None, description="Sector name")
@@ -71,6 +79,19 @@ class RecommendationHistoryListResponse(BaseModel):
     items: list[RecommendationHistoryItemResponse] = Field(default_factory=list)
     total: int = Field(..., ge=0)
     filters: RecommendationHistoryFiltersResponse
+
+
+class RecommendationDetailResponse(BaseModel):
+    recommendation: RecommendationHistoryItemResponse = Field(
+        ..., description="Recommendation history metadata"
+    )
+    analysis_detail: AnalysisReport | None = Field(
+        None, description="Linked analysis detail payload"
+    )
+
+
+class RecommendationHistoryDetailResponse(RecommendationDetailResponse):
+    pass
 
 
 class RecommendationHistoryDeleteRequest(BaseModel):

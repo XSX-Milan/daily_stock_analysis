@@ -209,31 +209,21 @@ def build_recommendation_agent(config=None, dimension: Optional[str] = None, ski
 
     from src.agent.agents.recommendation_agent import RecommendationAgent
     from src.agent.llm_adapter import LLMToolAdapter
-    from src.agent.skills.defaults import (
-        get_default_active_skill_ids,
-        get_default_technical_skill_policy,
-    )
+    from src.agent.skills.defaults import get_default_technical_skill_policy
 
     registry = get_tool_registry()
-    skill_manager = get_skill_manager(config)
 
-    configured_skills = getattr(config, "agent_skills", None) or None
-    explicit_skill_selection = bool(skills) or configured_skills is not None
-    default_skills = get_default_active_skill_ids(skill_manager.list_skills())
-    if skills is not None:
-        skills_to_activate = skills or default_skills
-    else:
-        skills_to_activate = configured_skills or default_skills
-    skill_manager.activate(skills_to_activate)
-    logger.info("[AgentFactory] Activated skills: %s (recommendation)", skills_to_activate)
+    configured_skills = getattr(config, "agent_skills", None)
+    if skills or configured_skills:
+        logger.info("[AgentFactory] Recommendation agent ignores dynamic skills; using built-in policy")
 
     llm_adapter = LLMToolAdapter(config)
     common_kwargs = {
         "tool_registry": registry,
         "llm_adapter": llm_adapter,
-        "skill_instructions": skill_manager.get_skill_instructions(),
+        "skill_instructions": "",
         "technical_skill_policy": get_default_technical_skill_policy(
-            explicit_skill_selection=explicit_skill_selection,
+            explicit_skill_selection=False,
         ),
     }
 

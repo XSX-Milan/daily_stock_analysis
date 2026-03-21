@@ -27,11 +27,12 @@ from src.agent.agents.risk_agent import RiskAgent
 from src.agent.agents.technical_agent import TechnicalAgent
 from src.recommendation.constants import (
     TECHNICAL_BASE_WEIGHT,
-    TECHNICAL_COUNTER_TREND_MA20_BONUS,
     TECHNICAL_COUNTER_TREND_MA20_MAX,
+    TECHNICAL_COUNTER_TREND_MA20_BONUS,
     TECHNICAL_COUNTER_TREND_MA60_BONUS,
     TECHNICAL_COUNTER_TREND_MA60_MAX,
     TECHNICAL_DELEGATED_WEIGHT,
+    TECHNICAL_HIGH_OPEN_TRAP_PCT,
     TECHNICAL_HEAVY_VOLUME_PENALTY_HIGH,
     TECHNICAL_HEAVY_VOLUME_PENALTY_HIGH_SCORE,
     TECHNICAL_HEAVY_VOLUME_PENALTY_LOW_SCORE,
@@ -51,6 +52,26 @@ from src.stock_analyzer import StockTrendAnalyzer
 
 logger = logging.getLogger(__name__)
 
+
+_BUILTIN_RECOMMENDATION_FRAMEWORK = """## Built-in Quant Recommendation Framework
+
+Data usage contract:
+- Prefer preloaded `news_items` for sentiment/catalyst analysis.
+- Reuse scanner-provided context first; call tools only for missing critical data.
+
+Nine-step decision chain:
+1) Market MA5 regime: MA5 up -> bullish regime; flat/down -> defensive regime.
+2) Sector rotation: prioritize sectors with clear catalyst continuation.
+3) Continuation test: >=2 days relative strength is higher quality than 1-day spikes.
+4) Stock selection: catalyst quality dominates generic "good-company" narratives.
+5) Entry: shrinking-volume pullback near MA5/MA10 is preferred; avoid blow-off tops.
+6) Risk: stop loss -7%, take profit +10%, and max holding window 10 trading days.
+7) Volume-price core: <=0.8 volume ratio can add score; >2.0 is risk penalty.
+8) Mandatory traps:
+   - Do not over-weight noisy capital-flow metrics as a core signal.
+   - Avoid chasing gap-up openings above +7%.
+9) Output discipline: record triggered rules and catalyst evidence in reasoning.
+"""
 
 _DIMENSION_PROFILES: dict[str, dict[str, str]] = {
     "technical": {
@@ -110,6 +131,7 @@ class RecommendationAgent(BaseAgent):
         self.agent_name = f"recommendation_{self.dimension}"
         self._trend_analyzer = StockTrendAnalyzer()
         self._agent_memory = AgentMemory.from_config()
+        self._framework_policy = _BUILTIN_RECOMMENDATION_FRAMEWORK.strip()
 
     def system_prompt(self, ctx: AgentContext) -> str:
         del ctx
@@ -118,6 +140,7 @@ class RecommendationAgent(BaseAgent):
             f"Focus on {self.profile['focus']}. "
             "Return one stable 0-100 score with clear evidence."
         )
+        prompt = f"{prompt}\n\n{self._framework_policy}"
         if self.dimension == "technical" and self.technical_skill_policy.strip():
             prompt = f"{prompt}\n\n{self.technical_skill_policy.strip()}"
         return prompt
@@ -279,7 +302,7 @@ class RecommendationAgent(BaseAgent):
         has_sufficient_history = trading_days is None or trading_days >= 5
         if self._is_cn_market_stock(ctx.stock_code):
             if has_sufficient_history and volume_ratio is not None:
-                if volume_ratio < TECHNICAL_SHRINK_VOLUME_MAX:
+                if volume_ratio <= TECHNICAL_SHRINK_VOLUME_MAX:
                     if (
                         price_vs_ma10 is not None
                         and abs(price_vs_ma10) <= TECHNICAL_PULLBACK_NEAR_MA10_MAX_ABS
@@ -421,6 +444,8 @@ class RecommendationAgent(BaseAgent):
         score = 100.0 - (100.0 - trend_score) * 0.6
         quote = self._as_mapping(ctx.get_data("quote") or {})
         turnover = self._to_float(quote.get("turnover_rate"), None)
+        open_price = self._to_float(quote.get("open_price"), None)
+        pre_close = self._to_float(quote.get("pre_close"), None)
         if turnover is not None:
             if turnover > 20:
                 score -= 20
@@ -428,6 +453,15 @@ class RecommendationAgent(BaseAgent):
                 score -= 10
             elif turnover < 3:
                 score += 5
+
+        if (
+            open_price is not None
+            and pre_close is not None
+            and pre_close > 0
+            and ((open_price - pre_close) / pre_close) * 100
+            > TECHNICAL_HIGH_OPEN_TRAP_PCT
+        ):
+            score -= 12
 
         score = score * 0.65 + self._delegated_score(delegated) * 0.35
         return self._clamp_0_100(score)
@@ -501,20 +535,19 @@ class RecommendationAgent(BaseAgent):
             risk_flags=list(ctx.risk_flags),
             meta=dict(ctx.meta),
         )
+        framework_instructions = self._framework_delegate_instructions(ctx)
 
         main_agents = [
             TechnicalAgent(
                 self.tool_registry,
                 self.llm_adapter,
-                self.skill_instructions,
+                framework_instructions,
                 technical_skill_policy=self.technical_skill_policy,
             ),
-            RiskAgent(self.tool_registry, self.llm_adapter, self.skill_instructions),
-            DecisionAgent(
-                self.tool_registry, self.llm_adapter, self.skill_instructions
-            ),
+            RiskAgent(self.tool_registry, self.llm_adapter, framework_instructions),
+            DecisionAgent(self.tool_registry, self.llm_adapter, framework_instructions),
             PortfolioAgent(
-                self.tool_registry, self.llm_adapter, self.skill_instructions
+                self.tool_registry, self.llm_adapter, framework_instructions
             ),
         ]
         if not self._has_preloaded_news_context(ctx):
@@ -523,7 +556,7 @@ class RecommendationAgent(BaseAgent):
                 IntelAgent(
                     self.tool_registry,
                     self.llm_adapter,
-                    self.skill_instructions,
+                    framework_instructions,
                 ),
             )
 
@@ -729,14 +762,56 @@ class RecommendationAgent(BaseAgent):
         trend_score: float,
         delegated: list[dict[str, Any]],
     ) -> str:
+        rule_hits = self._framework_rule_hits(ctx)
         parts = [
             f"{self.profile['title']} dimension score={score:.1f}/100",
             f"trend_analyzer_score={trend_score:.1f}",
             f"delegated_opinions={len(delegated)}",
+            "framework=builtin_quant_recommendation",
         ]
+        if rule_hits:
+            parts.append(f"rule_hits={','.join(rule_hits)}")
         if ctx.stock_code:
             parts.append(f"stock={ctx.stock_code}")
         return "; ".join(parts)
+
+    def _framework_delegate_instructions(self, ctx: AgentContext) -> str:
+        parts = [self._framework_policy]
+        if self._has_preloaded_news_context(ctx):
+            parts.append(
+                "Use preloaded `news_items` first and avoid redundant search calls."
+            )
+        return "\n\n".join(parts)
+
+    def _framework_rule_hits(self, ctx: AgentContext) -> list[str]:
+        hits: list[str] = []
+        quote = self._as_mapping(ctx.get_data("quote") or {})
+        technical = self._as_mapping(ctx.get_data("technical") or {})
+        volume_ratio = self._to_float(quote.get("volume_ratio"), None)
+        if volume_ratio is not None:
+            if volume_ratio <= TECHNICAL_SHRINK_VOLUME_MAX:
+                hits.append("shrink_volume_pullback")
+            elif volume_ratio > TECHNICAL_HEAVY_VOLUME_PENALTY_MIN:
+                hits.append("heavy_volume_risk")
+
+        price_vs_ma20 = self._to_float(technical.get("price_vs_ma20"), None)
+        if (
+            price_vs_ma20 is not None
+            and price_vs_ma20 <= TECHNICAL_COUNTER_TREND_MA20_MAX
+        ):
+            hits.append("counter_trend_ma20")
+
+        open_price = self._to_float(quote.get("open_price"), None)
+        pre_close = self._to_float(quote.get("pre_close"), None)
+        if (
+            open_price is not None
+            and pre_close is not None
+            and pre_close > 0
+            and ((open_price - pre_close) / pre_close) * 100
+            > TECHNICAL_HIGH_OPEN_TRAP_PCT
+        ):
+            hits.append("high_open_trap")
+        return hits
 
     def _build_key_levels(
         self, ctx: AgentContext, trend_score: float

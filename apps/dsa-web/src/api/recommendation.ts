@@ -3,7 +3,10 @@ import { toCamelCase } from './utils';
 import type { AnalysisReport } from '../types/analysis';
 import type {
   MarketRegion,
+  RecommendationHotSector,
+  RecommendationHotSectorsResponse,
   RecommendationItem,
+  RecommendationListFilters,
   RecommendationListParams,
   RecommendationListResponse,
   RecommendationRefreshRequest,
@@ -11,6 +14,8 @@ import type {
   PrioritySummary,
   WatchlistItem,
 } from '../types/recommendation';
+
+export type { RecommendationHotSector, RecommendationHotSectorsResponse } from '../types/recommendation';
 
 type RawCompositeScore = {
   totalScore?: number;
@@ -28,17 +33,14 @@ type RawRecommendationItem = Omit<Partial<RecommendationItem>, 'compositeScore'>
   currentPrice?: number;
   idealBuyPrice?: number | null;
   compositeScore?: number | RawCompositeScore;
+  sectors?: unknown;
+  sectorCanonicalKey?: unknown;
+  canonicalKey?: unknown;
+  sectorDisplayLabel?: unknown;
+  displayLabel?: unknown;
+  sectorAliases?: unknown;
+  aliases?: unknown;
 };
-
-export interface RecommendationHotSector {
-  name: string;
-  changePct?: number | null;
-  stockCount?: number | null;
-}
-
-export interface RecommendationHotSectorsResponse {
-  sectors: RecommendationHotSector[];
-}
 
 export interface RecommendationHistoryParams {
   market?: MarketRegion | string;
@@ -53,6 +55,10 @@ export interface RecommendationHistoryItem {
   code?: string;
   name?: string;
   sector?: string | null;
+  sectors?: string[];
+  sectorCanonicalKey?: string | null;
+  sectorDisplayLabel?: string | null;
+  sectorAliases?: string[];
   compositeScore?: number;
   priority?: string;
   recommendationDate?: string;
@@ -97,9 +103,92 @@ const toPositiveIntOrNull = (value: unknown): number | null => {
   return Number.isInteger(normalized) && normalized > 0 ? normalized : null;
 };
 
+const toNonEmptyStringOrNull = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+};
+
+const normalizeStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized: string[] = [];
+  for (const entry of value) {
+    const resolved = toNonEmptyStringOrNull(entry);
+    if (resolved && !normalized.includes(resolved)) {
+      normalized.push(resolved);
+    }
+  }
+  return normalized;
+};
+
+const normalizeSectors = (sectors: unknown, legacySector?: unknown): string[] => {
+  const normalized: string[] = [];
+  const legacy = toNonEmptyStringOrNull(legacySector);
+  if (legacy) {
+    normalized.push(legacy);
+  }
+
+  for (const item of normalizeStringArray(sectors)) {
+    if (!normalized.includes(item)) {
+      normalized.push(item);
+    }
+  }
+
+  return normalized;
+};
+
+const normalizeListFilters = (filters: unknown): RecommendationListFilters => {
+  if (!filters || typeof filters !== 'object') {
+    return {};
+  }
+
+  const rawFilters = toCamelCase<Record<string, unknown>>(filters);
+  const normalizedSectors = normalizeSectors(rawFilters.sectors, rawFilters.sector);
+  const normalizedSector = toNonEmptyStringOrNull(rawFilters.sector) ?? normalizedSectors[0];
+
+  return {
+    priority: toNonEmptyStringOrNull(rawFilters.priority) ?? undefined,
+    sector: normalizedSector ?? undefined,
+    sectors: normalizedSectors.length > 0 ? normalizedSectors : undefined,
+    market: toNonEmptyStringOrNull(rawFilters.market) ?? undefined,
+    region: toNonEmptyStringOrNull(rawFilters.region) ?? undefined,
+  };
+};
+
+const normalizeRefreshFilters = (filters: unknown): Record<string, unknown> => {
+  if (!filters || typeof filters !== 'object') {
+    return {};
+  }
+
+  const normalized = toCamelCase<Record<string, unknown>>(filters);
+  const normalizedSectors = normalizeSectors(normalized.sectors, normalized.sector);
+  if (normalizedSectors.length === 0) {
+    return normalized;
+  }
+
+  return {
+    ...normalized,
+    sector: toNonEmptyStringOrNull(normalized.sector) ?? normalizedSectors[0],
+    sectors: normalizedSectors,
+  };
+};
+
 const normalizeRecommendationItem = (input: unknown): RecommendationItem => {
   const item = input as RawRecommendationItem;
   const composite = item.compositeScore;
+  const normalizedSectors = normalizeSectors(item.sectors, item.sector);
+  const normalizedSector = toNonEmptyStringOrNull(item.sector) ?? normalizedSectors[0] ?? null;
+  const sectorCanonicalKey = toNonEmptyStringOrNull(item.sectorCanonicalKey) ?? toNonEmptyStringOrNull(item.canonicalKey);
+  const sectorDisplayLabel =
+    toNonEmptyStringOrNull(item.sectorDisplayLabel)
+    ?? toNonEmptyStringOrNull(item.displayLabel)
+    ?? normalizedSector;
+  const sectorAliases = normalizeStringArray(item.sectorAliases ?? item.aliases);
 
   const scoresFromComposite: Record<string, number> =
     isRawCompositeScore(composite) && Array.isArray(composite.dimensionScores)
@@ -130,7 +219,11 @@ const normalizeRecommendationItem = (input: unknown): RecommendationItem => {
     region: (item.region ?? item.market) as MarketRegion,
     analysisRecordId:
       typeof item.analysisRecordId === 'number' ? item.analysisRecordId : null,
-    sector: item.sector ?? null,
+    sector: normalizedSector,
+    sectors: normalizedSectors,
+    sectorCanonicalKey,
+    sectorDisplayLabel,
+    sectorAliases,
     scores: item.scores ?? scoresFromComposite,
     compositeScore,
     priority,
@@ -145,11 +238,11 @@ const normalizeRecommendationItem = (input: unknown): RecommendationItem => {
 };
 
 const normalizeRecommendationListResponse = (input: Record<string, unknown>): RecommendationListResponse => {
-  const data = toCamelCase<{ items?: unknown[]; total?: number; filters?: RecommendationListParams }>(input);
+  const data = toCamelCase<{ items?: unknown[]; total?: number; filters?: unknown }>(input);
   return {
     items: (data.items ?? []).map((item) => normalizeRecommendationItem(item)),
     total: data.total ?? 0,
-    filters: data.filters ?? {},
+    filters: normalizeListFilters(data.filters),
   };
 };
 
@@ -158,18 +251,31 @@ const normalizeRecommendationRefreshResponse = (input: Record<string, unknown>):
   return {
     items: (data.items ?? []).map((item) => normalizeRecommendationItem(item)),
     total: data.total ?? 0,
-    filters: data.filters ?? {},
+    filters: normalizeRefreshFilters(data.filters),
   };
 };
 
 const normalizeHotSectorsResponse = (input: Record<string, unknown>): RecommendationHotSectorsResponse => {
   const data = toCamelCase<{ sectors?: Array<Record<string, unknown>> }>(input);
   return {
-    sectors: (data.sectors ?? []).map((sector) => ({
-      name: String(sector.name ?? ''),
-      changePct: typeof sector.changePct === 'number' ? sector.changePct : null,
-      stockCount: typeof sector.stockCount === 'number' ? sector.stockCount : null,
-    })),
+    sectors: (data.sectors ?? []).map((sector) => {
+      const displayLabel = toNonEmptyStringOrNull(sector.displayLabel);
+      const legacyName = toNonEmptyStringOrNull(sector.name);
+      const normalizedName = displayLabel ?? legacyName ?? '';
+
+      return {
+        name: normalizedName,
+        canonicalKey: toNonEmptyStringOrNull(sector.canonicalKey),
+        displayLabel: displayLabel ?? legacyName,
+        aliases: normalizeStringArray(sector.aliases),
+        rawName: toNonEmptyStringOrNull(sector.rawName) ?? legacyName,
+        source: toNonEmptyStringOrNull(sector.source),
+        changePct: typeof sector.changePct === 'number' ? sector.changePct : null,
+        stockCount: typeof sector.stockCount === 'number' ? sector.stockCount : null,
+        snapshotAt: toNonEmptyStringOrNull(sector.snapshotAt),
+        fetchedAt: toNonEmptyStringOrNull(sector.fetchedAt),
+      } satisfies RecommendationHotSector;
+    }),
   };
 };
 
@@ -177,7 +283,17 @@ const normalizeRecommendationHistory = (input: unknown): RecommendationHistoryIt
   if (!Array.isArray(input)) {
     return [];
   }
-  return input.map((row) => toCamelCase<RecommendationHistoryItem>(row));
+
+  return input.map((row) => {
+    const item = toCamelCase<RecommendationHistoryItem>(row);
+    const normalizedSectors = normalizeSectors(item.sectors, item.sector);
+    const normalizedSector = toNonEmptyStringOrNull(item.sector) ?? normalizedSectors[0] ?? null;
+    return {
+      ...item,
+      sector: normalizedSector,
+      sectors: normalizedSectors,
+    };
+  });
 };
 
 const normalizeRecommendationHistoryResponse = (input: Record<string, unknown>): RecommendationHistoryResponse => {
@@ -196,20 +312,32 @@ const normalizeRecommendationDetailResponse = (
     recommendation?: RecommendationHistoryItem;
     analysisDetail?: AnalysisReport | null;
   }>(input);
+  const normalizedRecommendation = normalizeRecommendationHistory(
+    data.recommendation ? [data.recommendation] : [],
+  )[0] ?? {};
+
   return {
-    recommendation: data.recommendation ?? {},
+    recommendation: normalizedRecommendation,
     analysisDetail: data.analysisDetail ?? null,
   };
 };
 
 export const getRecommendations = async (params: RecommendationListParams = {}): Promise<RecommendationListResponse> => {
-  const queryParams: Record<string, string | number> = {};
-  if (params.priority) queryParams.priority = params.priority;
-  if (params.sector) queryParams.sector = params.sector;
-  if (params.market) queryParams.market = params.market;
-  if (!params.market && params.region) queryParams.market = params.region;
-  if (params.limit != null) queryParams.limit = params.limit;
-  if (params.offset != null) queryParams.offset = params.offset;
+  const queryParams = new URLSearchParams();
+  if (params.priority) queryParams.append('priority', String(params.priority));
+
+  const normalizedSectors = normalizeSectors(params.sectors, params.sector);
+  for (const sector of normalizedSectors) {
+    queryParams.append('sectors', sector);
+  }
+  if (normalizedSectors.length > 0) {
+    queryParams.append('sector', normalizedSectors[0]);
+  }
+
+  if (params.market) queryParams.append('market', String(params.market));
+  if (!params.market && params.region) queryParams.append('market', String(params.region));
+  if (params.limit != null) queryParams.append('limit', String(params.limit));
+  if (params.offset != null) queryParams.append('offset', String(params.offset));
 
   const response = await apiClient.get<Record<string, unknown>>('/api/v1/recommendation/list', {
     params: queryParams,
@@ -221,14 +349,15 @@ export const refreshRecommendations = async (
   request: RecommendationRefreshRequest,
 ): Promise<RecommendationRefreshResponse> => {
   const market = String(request.market ?? request.region ?? '').trim().toUpperCase();
-  const sector = typeof request.sector === 'string' ? request.sector.trim() : '';
+  const sectors = normalizeSectors(request.sectors, request.sector);
 
   const payload: Record<string, unknown> = {
     market,
     force: request.forceRefresh ?? request.force ?? false,
   };
-  if (sector) {
-    payload.sector = sector;
+  if (sectors.length > 0) {
+    payload.sectors = sectors;
+    payload.sector = sectors[0];
   }
   if (request.stockCodes && request.stockCodes.length > 0) {
     payload.stock_codes = request.stockCodes;

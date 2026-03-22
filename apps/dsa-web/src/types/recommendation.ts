@@ -16,7 +16,13 @@ export const MarketRegion = {
 
 export type MarketRegion = (typeof MarketRegion)[keyof typeof MarketRegion];
 
-export interface RecommendationItem {
+export interface RecommendationSectorMetadata {
+  sectorCanonicalKey?: string | null;
+  sectorDisplayLabel?: string | null;
+  sectorAliases?: string[];
+}
+
+export interface RecommendationItem extends RecommendationSectorMetadata {
   recommendationRecordId?: number | null;
   stockCode: string;
   name: string;
@@ -25,6 +31,7 @@ export interface RecommendationItem {
   region?: MarketRegion;
   analysisRecordId?: number | null;
   sector?: string | null;
+  sectors?: string[];
   scores: Record<string, number>;
   compositeScore: number;
   priority: RecommendationPriority | string;
@@ -52,11 +59,12 @@ export interface CompositeScore {
   aiSummary: string | null;
 }
 
-export interface StockRecommendation {
+export interface StockRecommendation extends RecommendationSectorMetadata {
   code: string;
   name: string;
   region: MarketRegion;
   sector: string | null;
+  sectors?: string[];
   currentPrice: number;
   compositeScore: CompositeScore;
   idealBuyPrice: number | null;
@@ -79,6 +87,10 @@ export interface RecommendationFilters {
   region?: MarketRegion | string;
 }
 
+export interface RecommendationListFilters extends RecommendationFilters {
+  sectors?: string[];
+}
+
 export interface PrioritySummary {
   buyNow: number;
   position: number;
@@ -86,16 +98,15 @@ export interface PrioritySummary {
   noEntry: number;
 }
 
-export type RecommendationListFilters = RecommendationFilters;
 export type RecommendationSummary = PrioritySummary;
 
 export interface RecommendationListResponse {
   items: RecommendationItem[];
   total: number;
-  filters: RecommendationFilters;
+  filters: RecommendationListFilters;
 }
 
-export interface RecommendationListParams extends RecommendationFilters {
+export interface RecommendationListParams extends RecommendationListFilters {
   limit?: number;
   offset?: number;
 }
@@ -103,7 +114,8 @@ export interface RecommendationListParams extends RecommendationFilters {
 export interface RecommendationRefreshRequest {
   market: MarketRegion | string;
   region?: MarketRegion | string;
-  sector: string;
+  sector?: string;
+  sectors?: string[];
   force?: boolean;
   forceRefresh?: boolean;
   stockCodes?: string[];
@@ -113,4 +125,21 @@ export interface RecommendationRefreshResponse {
   items: RecommendationItem[];
   total: number;
   filters: Record<string, unknown>;
+}
+
+export interface RecommendationHotSector {
+  name: string;
+  canonicalKey?: string | null;
+  displayLabel?: string | null;
+  aliases?: string[];
+  rawName?: string | null;
+  source?: string | null;
+  changePct?: number | null;
+  stockCount?: number | null;
+  snapshotAt?: string | null;
+  fetchedAt?: string | null;
+}
+
+export interface RecommendationHotSectorsResponse {
+  sectors: RecommendationHotSector[];
 }

@@ -7,6 +7,59 @@ type AuthStatus = {
   loggedIn: boolean;
 };
 
+const RECOMMENDATION_STORE_PERSIST_KEY = 'dsa-web-recommendation-store';
+
+async function seedRecommendationSectorState(page: Page) {
+  await page.addInitScript(([persistKey]) => {
+    window.localStorage.setItem(
+      persistKey,
+      JSON.stringify({
+        state: {
+          selectedSectorsByMarket: {
+            CN: ['算力'],
+          },
+          hotSectorsByMarket: {
+            CN: [
+              {
+                name: '算力',
+                canonicalKey: 'computingpower',
+                displayLabel: '算力',
+                aliases: ['算力', 'Computing Power'],
+                rawName: '算力',
+                source: 'smoke-seed',
+                changePct: 1.4,
+                stockCount: 16,
+                snapshotAt: '2026-03-22T09:00:00Z',
+                fetchedAt: '2026-03-22T09:01:00Z',
+              },
+              {
+                name: '逆变器',
+                canonicalKey: 'inverter',
+                displayLabel: '逆变器',
+                aliases: ['逆变器'],
+                rawName: '逆变器',
+                source: 'smoke-seed',
+                changePct: 0.9,
+                stockCount: 12,
+                snapshotAt: '2026-03-22T09:00:00Z',
+                fetchedAt: '2026-03-22T09:01:00Z',
+              },
+            ],
+          },
+          hotSectorCacheMetaByMarket: {
+            CN: {
+              snapshotAt: '2026-03-22T09:00:00Z',
+              fetchedAt: '2026-03-22T09:01:00Z',
+              cachedAt: '2026-03-22T09:01:05Z',
+            },
+          },
+        },
+        version: 1,
+      }),
+    );
+  }, [RECOMMENDATION_STORE_PERSIST_KEY]);
+}
+
 async function fetchAuthStatus(page: Page): Promise<AuthStatus> {
   const response = await page.request.get('/api/v1/auth/status');
   expect(response.ok()).toBeTruthy();
@@ -119,6 +172,34 @@ test.describe('web smoke', () => {
     expect(new URL(page.url()).pathname).toBe('/recommend');
   });
 
+  test('recommendation page keeps sector chip interactions on-page', async ({ page }) => {
+    await login(page);
+    await seedRecommendationSectorState(page);
+
+    await page.goto('/recommend');
+    await page.waitForLoadState('domcontentloaded');
+
+    await expect(page.getByTestId('recommend-page')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('sector-filters')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('sector-tag-算力')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('sector-tag-逆变器')).toBeVisible({ timeout: 10_000 });
+
+    const refreshButton = page.getByTestId('manual-refresh-button');
+    await expect(refreshButton).toContainText('推荐');
+
+    await page.getByTestId('sector-tag-算力').click();
+    await expect(refreshButton).toContainText('智能推荐');
+    expect(new URL(page.url()).pathname).toBe('/recommend');
+
+    await page.getByTestId('sector-tag-逆变器').click();
+    await expect(refreshButton).toContainText('推荐');
+    expect(new URL(page.url()).pathname).toBe('/recommend');
+
+    await page.getByTestId('sector-tag-All').click();
+    await expect(refreshButton).toContainText('智能推荐');
+    expect(new URL(page.url()).pathname).toBe('/recommend');
+  });
+
   test('home page shows analysis entry and history panel after login', async ({ page }) => {
     await login(page);
 
@@ -126,7 +207,7 @@ test.describe('web smoke', () => {
     await expect(stockInput).toBeVisible({ timeout: 10_000 });
     await expect(page.getByRole('link', { name: '首页' })).toBeVisible();
     await expect(page.getByRole('link', { name: '问股' })).toBeVisible();
-    await expect(page.getByText('历史分析')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '历史分析' })).toBeVisible();
 
     await stockInput.fill('600519');
     const analyzeButton = page.getByRole('button', { name: '分析', exact: true });

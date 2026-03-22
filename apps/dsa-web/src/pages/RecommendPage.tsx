@@ -12,7 +12,7 @@ import {
 } from '../components/recommendation';
 import { RecommendationHistory } from '../components/recommendation/RecommendationHistory';
 import { useRecommendationStore } from '../stores/recommendationStore';
-import type { RecommendationFilters, RecommendationItem } from '../types/recommendation';
+import type { RecommendationItem, RecommendationListFilters } from '../types/recommendation';
 import { MarketRegion, RecommendationPriority } from '../types/recommendation';
 
 const PRIORITY_LABELS: Record<string, string> = {
@@ -37,6 +37,63 @@ const MARKET_LABELS: Record<string, string> = {
 };
 
 const normalizeMarket = (value?: string): string => String(value ?? '').trim().toUpperCase();
+
+const toNonEmptySectorValue = (value: unknown): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+};
+
+const normalizeSectors = (sectors: unknown, legacySector?: unknown): string[] => {
+  const normalized: string[] = [];
+  const appendSector = (value: unknown) => {
+    const resolved = toNonEmptySectorValue(value);
+    if (resolved && !normalized.includes(resolved)) {
+      normalized.push(resolved);
+    }
+  };
+
+  appendSector(legacySector);
+  if (Array.isArray(sectors)) {
+    sectors.forEach((sector) => {
+      appendSector(sector);
+    });
+  }
+
+  return normalized;
+};
+
+const appendSectorMatchTokens = (tokenSet: Set<string>, value: unknown) => {
+  const resolved = toNonEmptySectorValue(value);
+  if (!resolved) {
+    return;
+  }
+
+  const normalized = resolved.toLowerCase();
+  tokenSet.add(normalized);
+
+  const compact = normalized.replace(/\s+/g, '');
+  if (compact.length > 0) {
+    tokenSet.add(compact);
+  }
+};
+
+const buildRecommendationSectorTokens = (item: RecommendationItem): Set<string> => {
+  const tokenSet = new Set<string>();
+
+  normalizeSectors(item.sectors, item.sector).forEach((sector) => {
+    appendSectorMatchTokens(tokenSet, sector);
+  });
+  appendSectorMatchTokens(tokenSet, item.sectorCanonicalKey);
+  appendSectorMatchTokens(tokenSet, item.sectorDisplayLabel);
+  (item.sectorAliases ?? []).forEach((alias) => {
+    appendSectorMatchTokens(tokenSet, alias);
+  });
+
+  return tokenSet;
+};
 
 const RecommendPage: React.FC = () => {
   const navigate = useNavigate();
@@ -64,6 +121,9 @@ const RecommendPage: React.FC = () => {
     fetchHotSectors,
     triggerRefresh,
     setFilter,
+    selectedSectorsByMarket,
+    setSelectedSectorsForMarket,
+    clearSelectedSectorsForMarket,
     fetchHistory,
     deleteHistoryByIds,
     openHistoryDetail,
@@ -72,7 +132,6 @@ const RecommendPage: React.FC = () => {
   } = useRecommendationStore();
   
   const [viewMode, setViewMode] = useState<'live' | 'history'>('live');
-  const [selectedSector, setSelectedSector] = useState<string | null>(null);
   const [smartRecommendAttempted, setSmartRecommendAttempted] = useState(false);
   const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<number>>(new Set());
   const attemptedHotSectorFetchByMarketRef = useRef<Set<string>>(new Set());
@@ -201,15 +260,6 @@ const RecommendPage: React.FC = () => {
     [recommendations, selectedMarket],
   );
 
-  const availableSectors = useMemo(() => {
-    const sectors = new Set<string>();
-    recommendationPool.forEach((item) => {
-      const sector = item.sector?.trim();
-      if (sector) sectors.add(sector);
-    });
-    return sectors;
-  }, [recommendationPool]);
-
   const activeHotSectors = useMemo(
     () => {
       const marketScopedHotSectors = hotSectorsByMarket[fallbackHotSectorMarket];
@@ -224,22 +274,70 @@ const RecommendPage: React.FC = () => {
     [fallbackHotSectorMarket, hotSectors, hotSectorsByMarket, hotSectorsMarket],
   );
 
-  const selectableSectors = useMemo(() => {
-    const sectors = new Set<string>(availableSectors);
-    activeHotSectors.forEach((sector) => {
-      const sectorName = String(sector.name ?? '').trim();
-      if (sectorName) {
-        sectors.add(sectorName);
-      }
-    });
-    return sectors;
-  }, [activeHotSectors, availableSectors]);
+  const activeSectorMarket = selectedMarket || fallbackHotSectorMarket;
+  const selectedSectors = useMemo(
+    () => normalizeSectors(selectedSectorsByMarket[activeSectorMarket]),
+    [activeSectorMarket, selectedSectorsByMarket],
+  );
+  const hasSelectedSectors = selectedSectors.length > 0;
 
-  const activeSector = selectedSector && selectableSectors.has(selectedSector) ? selectedSector : null;
+  const canonicalKeyByToken = useMemo(() => {
+    const aliasToCanonical = new Map<string, string>();
+    activeHotSectors.forEach((sector) => {
+      const canonicalKey = toNonEmptySectorValue(sector.canonicalKey);
+      if (!canonicalKey) {
+        return;
+      }
+      const candidateLabels: unknown[] = [
+        sector.name,
+        sector.displayLabel,
+        sector.canonicalKey,
+        ...(sector.aliases ?? []),
+      ];
+      candidateLabels.forEach((candidateLabel) => {
+        const candidateTokens = new Set<string>();
+        appendSectorMatchTokens(candidateTokens, candidateLabel);
+        candidateTokens.forEach((token) => {
+          aliasToCanonical.set(token, canonicalKey);
+        });
+      });
+    });
+    return aliasToCanonical;
+  }, [activeHotSectors]);
+
+  const selectedSectorTokens = useMemo(() => {
+    const tokens = new Set<string>();
+    selectedSectors.forEach((sector) => {
+      appendSectorMatchTokens(tokens, sector);
+
+      const sectorLookupTokens = new Set<string>();
+      appendSectorMatchTokens(sectorLookupTokens, sector);
+      sectorLookupTokens.forEach((lookupToken) => {
+        const canonicalKey = canonicalKeyByToken.get(lookupToken);
+        if (canonicalKey) {
+          appendSectorMatchTokens(tokens, canonicalKey);
+        }
+      });
+    });
+    return tokens;
+  }, [canonicalKeyByToken, selectedSectors]);
 
   const filteredRecommendations = useMemo(
-    () => recommendationPool.filter((item) => !activeSector || item.sector?.trim() === activeSector),
-    [recommendationPool, activeSector],
+    () => recommendationPool.filter((item) => {
+      if (!hasSelectedSectors) {
+        return true;
+      }
+
+      const itemTokens = buildRecommendationSectorTokens(item);
+      for (const selectedToken of selectedSectorTokens) {
+        if (itemTokens.has(selectedToken)) {
+          return true;
+        }
+      }
+
+      return false;
+    }),
+    [hasSelectedSectors, recommendationPool, selectedSectorTokens],
   );
 
   const hasActiveHotSectorData = activeHotSectors.length > 0;
@@ -279,8 +377,8 @@ const RecommendPage: React.FC = () => {
 
   const refreshDisabled = loading || !selectedMarket;
 
-  const buildNextFilters = (market?: string, priority?: string): RecommendationFilters => {
-    const nextFilters: RecommendationFilters = {
+  const buildNextFilters = (market?: string, priority?: string): RecommendationListFilters => {
+    const nextFilters: RecommendationListFilters = {
       ...filters,
       market,
       priority,
@@ -295,13 +393,13 @@ const RecommendPage: React.FC = () => {
       delete nextFilters.priority;
     }
     delete nextFilters.sector;
+    delete nextFilters.sectors;
 
     return nextFilters;
   };
 
   const handleMarketChange = (value: string) => {
     const market = normalizeMarket(value) || undefined;
-    setSelectedSector(null);
     setSmartRecommendAttempted(false);
     setFilter('market', market);
     setFilter('region', undefined);
@@ -316,22 +414,54 @@ const RecommendPage: React.FC = () => {
     void fetchRecommendations(nextFilters);
   };
 
-  const handleSectorChange = (sector: string | null) => {
-    setSelectedSector(sector);
+  const handleSectorToggle = (sectorOrSectors: string | string[]) => {
+    const current = new Set(selectedSectors);
+    const sectorsToToggle = Array.isArray(sectorOrSectors) ? sectorOrSectors : [sectorOrSectors];
+    
+    let isRemoving = false;
+    for (const s of sectorsToToggle) {
+      if (current.has(s)) {
+        isRemoving = true;
+        break;
+      }
+    }
+
+    if (isRemoving) {
+      for (const s of sectorsToToggle) {
+        current.delete(s);
+      }
+    } else {
+      for (const s of sectorsToToggle) {
+        current.add(s);
+      }
+    }
+
+    const nextArr = Array.from(current);
+    if (nextArr.length > 0) {
+      setSelectedSectorsForMarket(activeSectorMarket, nextArr);
+    } else {
+      clearSelectedSectorsForMarket(activeSectorMarket);
+    }
+    setSmartRecommendAttempted(false);
+  };
+
+  const handleClearAllSectors = () => {
+    clearSelectedSectorsForMarket(activeSectorMarket);
     setSmartRecommendAttempted(false);
   };
 
   const handleRefresh = async () => {
     if (!selectedMarket) return;
     
-    if (!activeSector) {
+    if (!hasSelectedSectors) {
       setSmartRecommendAttempted(true);
       await fetchHotSectors(selectedMarket);
       await triggerRefresh({ market: selectedMarket });
     } else {
       await triggerRefresh({
         market: selectedMarket,
-        sector: activeSector,
+        sector: selectedSectors[0],
+        sectors: selectedSectors,
       });
     }
   };
@@ -376,7 +506,7 @@ const RecommendPage: React.FC = () => {
               <RecommendationHeader
                 loading={loading}
                 refreshDisabled={refreshDisabled}
-                mode={!activeSector ? 'smart' : 'manual'}
+                mode={!hasSelectedSectors ? 'smart' : 'manual'}
                 onRefresh={() => {
                   void handleRefresh();
                 }}
@@ -411,12 +541,13 @@ const RecommendPage: React.FC = () => {
 
             <SectorFilters
               recommendations={recommendationPool}
-              selectedSector={activeSector}
-              onSectorChange={handleSectorChange}
-              hotSectorNames={activeHotSectors.map((s) => s.name)}
+              selectedSectors={selectedSectors}
+              onSectorToggle={handleSectorToggle}
+              onClearAll={handleClearAllSectors}
+              hotSectors={activeHotSectors}
             />
 
-            {!activeSector && smartRecommendAttempted && (
+            {!hasSelectedSectors && smartRecommendAttempted && (
               <div className="glass-card border border-orange-500/30 bg-orange-500/5 p-3 flex items-center gap-2 text-sm" data-testid="hot-sectors-display">
                 <span className="text-orange-400 font-medium whitespace-nowrap">🔥 智能推荐热门板块：</span>
                 {activeHotSectors.length > 0 ? (

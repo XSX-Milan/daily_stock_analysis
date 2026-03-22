@@ -5,6 +5,8 @@ import type { AnalysisReport } from '../../types/analysis';
 import type { RecommendationItem } from '../../types/recommendation';
 import { useRecommendationStore } from '../recommendationStore';
 
+const RECOMMENDATION_STORE_PERSIST_KEY = 'dsa-web-recommendation-store';
+
 vi.mock('../../api/recommendation', async () => {
   const actual = await vi.importActual<typeof import('../../api/recommendation')>('../../api/recommendation');
   return {
@@ -28,6 +30,8 @@ const resetStore = () => {
     hotSectors: [],
     hotSectorsMarket: undefined,
     hotSectorsByMarket: {},
+    hotSectorCacheMetaByMarket: {},
+    selectedSectorsByMarket: {},
     historyList: [],
     historyTotal: 0,
     historyLimit: 50,
@@ -63,8 +67,10 @@ const linkedAnalysisDetail: AnalysisReport = {
 };
 
 describe('recommendationStore', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await useRecommendationStore.persist.clearStorage();
+    localStorage.removeItem(RECOMMENDATION_STORE_PERSIST_KEY);
     resetStore();
   });
 
@@ -327,8 +333,15 @@ describe('recommendationStore', () => {
       sectors: [
         {
           name: '科技',
+          canonicalKey: 'technology',
+          displayLabel: '科技',
+          aliases: ['科技', 'Technology'],
+          rawName: '科技板块',
+          source: 'eastmoney',
           changePct: 1.2,
           stockCount: 18,
+          snapshotAt: '2026-03-21T08:00:00Z',
+          fetchedAt: '2026-03-21T08:05:00Z',
         },
       ],
     });
@@ -342,17 +355,38 @@ describe('recommendationStore', () => {
     expect(state.hotSectors).toEqual([
       {
         name: '科技',
+        canonicalKey: 'technology',
+        displayLabel: '科技',
+        aliases: ['科技', 'Technology'],
+        rawName: '科技板块',
+        source: 'eastmoney',
         changePct: 1.2,
         stockCount: 18,
+        snapshotAt: '2026-03-21T08:00:00Z',
+        fetchedAt: '2026-03-21T08:05:00Z',
       },
     ]);
     expect(state.hotSectorsByMarket.CN).toEqual([
       {
         name: '科技',
+        canonicalKey: 'technology',
+        displayLabel: '科技',
+        aliases: ['科技', 'Technology'],
+        rawName: '科技板块',
+        source: 'eastmoney',
         changePct: 1.2,
         stockCount: 18,
+        snapshotAt: '2026-03-21T08:00:00Z',
+        fetchedAt: '2026-03-21T08:05:00Z',
       },
     ]);
+    expect(state.hotSectorCacheMetaByMarket.CN).toEqual(
+      expect.objectContaining({
+        snapshotAt: '2026-03-21T08:00:00Z',
+        fetchedAt: '2026-03-21T08:05:00Z',
+      }),
+    );
+    expect(typeof state.hotSectorCacheMetaByMarket.CN.cachedAt).toBe('string');
   });
 
   it('returns false when fetching hot sectors without market', async () => {
@@ -399,5 +433,287 @@ describe('recommendationStore', () => {
     expect(refreshFilters).toBeDefined();
     expect(refreshFilters?.market).toBe('US');
     expect('region' in (refreshFilters ?? {})).toBe(false);
+  });
+
+  it('rehydrates selected sectors and hot-sector cache by market from persisted store', async () => {
+    useRecommendationStore.getState().setSelectedSectorsForMarket('cn', ['科技', '新能源']);
+    useRecommendationStore.getState().setSelectedSectorsForMarket('us', ['Technology']);
+    useRecommendationStore.setState({
+      hotSectorsByMarket: {
+        CN: [
+          {
+            name: '科技',
+            canonicalKey: 'technology',
+            displayLabel: '科技',
+            aliases: ['科技', 'Technology'],
+            rawName: '科技板块',
+            source: 'eastmoney',
+            changePct: 1.5,
+            stockCount: 20,
+            snapshotAt: '2026-03-21T08:00:00Z',
+            fetchedAt: '2026-03-21T08:05:00Z',
+          },
+        ],
+        US: [
+          {
+            name: 'Technology',
+            canonicalKey: 'technology',
+            displayLabel: 'Technology',
+            aliases: ['Technology', 'tech'],
+            rawName: 'technology',
+            source: 'yfinance',
+            changePct: 2.1,
+            stockCount: 24,
+            snapshotAt: '2026-03-21T10:00:00Z',
+            fetchedAt: '2026-03-21T10:03:00Z',
+          },
+        ],
+      },
+      hotSectorCacheMetaByMarket: {
+        CN: {
+          snapshotAt: '2026-03-21T08:00:00Z',
+          fetchedAt: '2026-03-21T08:05:00Z',
+          cachedAt: '2026-03-21T08:05:10Z',
+        },
+        US: {
+          snapshotAt: '2026-03-21T10:00:00Z',
+          fetchedAt: '2026-03-21T10:03:00Z',
+          cachedAt: '2026-03-21T10:03:10Z',
+        },
+      },
+    });
+
+    const persistedSnapshot = localStorage.getItem(RECOMMENDATION_STORE_PERSIST_KEY);
+    expect(persistedSnapshot).toBeTruthy();
+
+    resetStore();
+    localStorage.setItem(RECOMMENDATION_STORE_PERSIST_KEY, persistedSnapshot ?? '');
+    await useRecommendationStore.persist.rehydrate();
+
+    const state = useRecommendationStore.getState();
+    expect(state.selectedSectorsByMarket.CN).toEqual(['科技', '新能源']);
+    expect(state.selectedSectorsByMarket.US).toEqual(['Technology']);
+    expect(state.hotSectorsByMarket.CN).toEqual([
+      expect.objectContaining({
+        name: '科技',
+        canonicalKey: 'technology',
+      }),
+    ]);
+    expect(state.hotSectorsByMarket.US).toEqual([
+      expect.objectContaining({
+        name: 'Technology',
+        canonicalKey: 'technology',
+      }),
+    ]);
+    expect(state.hotSectorCacheMetaByMarket.CN).toEqual(
+      expect.objectContaining({
+        snapshotAt: '2026-03-21T08:00:00Z',
+        fetchedAt: '2026-03-21T08:05:00Z',
+      }),
+    );
+    expect(state.hotSectorCacheMetaByMarket.US).toEqual(
+      expect.objectContaining({
+        snapshotAt: '2026-03-21T10:00:00Z',
+        fetchedAt: '2026-03-21T10:03:00Z',
+      }),
+    );
+  });
+
+  it('keeps fresher in-memory hot-sector snapshot when persisted cache is stale', async () => {
+    useRecommendationStore.setState({
+      hotSectorsByMarket: {
+        CN: [
+          {
+            name: '科技',
+            canonicalKey: 'technology',
+            displayLabel: '科技',
+            aliases: ['科技', 'Technology'],
+            rawName: '科技板块',
+            source: 'eastmoney',
+            changePct: 2.3,
+            stockCount: 30,
+            snapshotAt: '2026-03-22T09:00:00Z',
+            fetchedAt: '2026-03-22T09:01:00Z',
+          },
+        ],
+      },
+      hotSectorCacheMetaByMarket: {
+        CN: {
+          snapshotAt: '2026-03-22T09:00:00Z',
+          fetchedAt: '2026-03-22T09:01:00Z',
+          cachedAt: '2026-03-22T09:01:05Z',
+        },
+      },
+    });
+
+    localStorage.setItem(
+      RECOMMENDATION_STORE_PERSIST_KEY,
+      JSON.stringify({
+        state: {
+          selectedSectorsByMarket: {
+            CN: ['旧板块'],
+          },
+          hotSectorsByMarket: {
+            CN: [
+              {
+                name: '旧科技',
+                canonicalKey: 'technology',
+                displayLabel: '旧科技',
+                aliases: ['旧科技'],
+                rawName: '旧科技',
+                source: 'legacy-cache',
+                changePct: 0.2,
+                stockCount: 9,
+                snapshotAt: '2026-03-20T09:00:00Z',
+                fetchedAt: '2026-03-20T09:01:00Z',
+              },
+            ],
+          },
+          hotSectorCacheMetaByMarket: {
+            CN: {
+              snapshotAt: '2026-03-20T09:00:00Z',
+              fetchedAt: '2026-03-20T09:01:00Z',
+              cachedAt: '2026-03-20T09:01:05Z',
+            },
+          },
+        },
+        version: 1,
+      }),
+    );
+
+    await useRecommendationStore.persist.rehydrate();
+
+    const state = useRecommendationStore.getState();
+    expect(state.hotSectorsByMarket.CN).toEqual([
+      expect.objectContaining({
+        name: '科技',
+        snapshotAt: '2026-03-22T09:00:00Z',
+      }),
+    ]);
+    expect(state.hotSectorCacheMetaByMarket.CN.snapshotAt).toBe('2026-03-22T09:00:00Z');
+    expect(state.selectedSectorsByMarket.CN).toEqual(['旧板块']);
+  });
+
+  it('normalizes triggerRefresh sectors[] and clears stale single-sector filter state', async () => {
+    useRecommendationStore.setState({
+      filters: {
+        market: 'US',
+        region: 'US',
+        priority: 'BUY_NOW',
+        sector: 'OldSector',
+        sectors: ['OldSector'],
+      },
+    });
+    vi.mocked(recommendationApi.triggerRefresh).mockResolvedValue({
+      items: [],
+      total: 0,
+      filters: {},
+    });
+    vi.mocked(recommendationApi.getRecommendations).mockResolvedValue({
+      items: [],
+      total: 0,
+      filters: {},
+    });
+    vi.mocked(recommendationApi.getSummary).mockResolvedValue({
+      buyNow: 0,
+      position: 0,
+      waitPullback: 0,
+      noEntry: 0,
+    });
+
+    await useRecommendationStore.getState().triggerRefresh({
+      market: ' us ',
+      sectors: ['Technology', 'Finance', 'Technology'],
+    });
+
+    expect(recommendationApi.triggerRefresh).toHaveBeenCalledWith(
+      expect.objectContaining({
+        market: 'US',
+        sector: 'Technology',
+        sectors: ['Technology', 'Finance'],
+      }),
+    );
+
+    await vi.waitFor(() => {
+      const refreshedFilters = vi.mocked(recommendationApi.getRecommendations).mock.calls[0]?.[0];
+      expect(refreshedFilters).toEqual(
+        expect.objectContaining({
+          market: 'US',
+          sector: 'Technology',
+          sectors: ['Technology', 'Finance'],
+        }),
+      );
+      expect('region' in (refreshedFilters ?? {})).toBe(false);
+      expect(useRecommendationStore.getState().selectedSectorsByMarket.US).toEqual(['Technology', 'Finance']);
+      expect(useRecommendationStore.getState().filters).toEqual(
+        expect.objectContaining({
+          market: 'US',
+          priority: 'BUY_NOW',
+          sector: 'Technology',
+          sectors: ['Technology', 'Finance'],
+        }),
+      );
+    });
+
+    vi.mocked(recommendationApi.getRecommendations).mockClear();
+
+    await useRecommendationStore.getState().triggerRefresh({ market: 'US' });
+
+    await vi.waitFor(() => {
+      const refreshFilters = vi.mocked(recommendationApi.getRecommendations).mock.calls[0]?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      expect(refreshFilters?.market).toBe('US');
+      expect(refreshFilters).toBeDefined();
+      expect('sector' in (refreshFilters ?? {})).toBe(false);
+      expect('sectors' in (refreshFilters ?? {})).toBe(false);
+      expect(useRecommendationStore.getState().selectedSectorsByMarket.US).toBeUndefined();
+      expect('sector' in useRecommendationStore.getState().filters).toBe(false);
+      expect('sectors' in useRecommendationStore.getState().filters).toBe(false);
+    });
+  });
+
+  it('clears only the active market sector selection when refresh scope is removed', async () => {
+    useRecommendationStore.setState({
+      filters: {
+        market: 'US',
+        region: 'US',
+        sector: 'Technology',
+        sectors: ['Technology'],
+      },
+      selectedSectorsByMarket: {
+        CN: ['科技'],
+        US: ['Technology'],
+      },
+    });
+    vi.mocked(recommendationApi.triggerRefresh).mockResolvedValue({
+      items: [],
+      total: 0,
+      filters: {},
+    });
+    vi.mocked(recommendationApi.getRecommendations).mockResolvedValue({
+      items: [],
+      total: 0,
+      filters: {},
+    });
+    vi.mocked(recommendationApi.getSummary).mockResolvedValue({
+      buyNow: 0,
+      position: 0,
+      waitPullback: 0,
+      noEntry: 0,
+    });
+
+    await useRecommendationStore.getState().triggerRefresh({ market: 'US' });
+
+    await vi.waitFor(() => {
+      const refreshFilters = vi.mocked(recommendationApi.getRecommendations).mock.calls[0]?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      expect(refreshFilters?.market).toBe('US');
+      expect('sector' in (refreshFilters ?? {})).toBe(false);
+      expect('sectors' in (refreshFilters ?? {})).toBe(false);
+      expect(useRecommendationStore.getState().selectedSectorsByMarket.CN).toEqual(['科技']);
+      expect(useRecommendationStore.getState().selectedSectorsByMarket.US).toBeUndefined();
+    });
   });
 });

@@ -13,6 +13,7 @@ const mockStoreState = vi.hoisted(() => ({
   hotSectors: [] as Array<Record<string, unknown>>,
   hotSectorsMarket: undefined as string | undefined,
   hotSectorsByMarket: {} as Record<string, Array<Record<string, unknown>>>,
+  selectedSectorsByMarket: {} as Record<string, string[]>,
   historyList: [] as Array<Record<string, unknown>>,
   historyTotal: 0,
   historyLimit: 50,
@@ -28,6 +29,39 @@ const mockStoreState = vi.hoisted(() => ({
   fetchHotSectors: vi.fn().mockResolvedValue(true),
   triggerRefresh: vi.fn().mockResolvedValue(undefined),
   setFilter: vi.fn(),
+  setSelectedSectorsForMarket: vi.fn((market: string, sectors: string[]) => {
+    const normalizedMarket = String(market ?? '').trim().toUpperCase();
+    if (!normalizedMarket) {
+      return;
+    }
+    const normalizedSectors = Array.from(
+      new Set(
+        (Array.isArray(sectors) ? sectors : [])
+          .map((sector) => String(sector ?? '').trim())
+          .filter((sector) => sector.length > 0),
+      ),
+    );
+    if (normalizedSectors.length === 0) {
+      const nextSelectedSectorsByMarket = { ...mockStoreState.selectedSectorsByMarket };
+      delete nextSelectedSectorsByMarket[normalizedMarket];
+      mockStoreState.selectedSectorsByMarket = nextSelectedSectorsByMarket;
+      return;
+    }
+    mockStoreState.selectedSectorsByMarket = {
+      ...mockStoreState.selectedSectorsByMarket,
+      [normalizedMarket]: normalizedSectors,
+    };
+  }),
+  clearSelectedSectorsForMarket: vi.fn((market?: string) => {
+    const normalizedMarket = String(market ?? '').trim().toUpperCase();
+    if (!normalizedMarket) {
+      mockStoreState.selectedSectorsByMarket = {};
+      return;
+    }
+    const nextSelectedSectorsByMarket = { ...mockStoreState.selectedSectorsByMarket };
+    delete nextSelectedSectorsByMarket[normalizedMarket];
+    mockStoreState.selectedSectorsByMarket = nextSelectedSectorsByMarket;
+  }),
   fetchHistory: vi.fn().mockResolvedValue(undefined),
   deleteHistoryByIds: vi.fn().mockResolvedValue(undefined),
   openHistoryDetail: vi.fn().mockResolvedValue(undefined),
@@ -67,6 +101,7 @@ describe('RecommendPage', () => {
       hotSectors: [],
       hotSectorsMarket: undefined,
       hotSectorsByMarket: {},
+      selectedSectorsByMarket: {},
       historyList: [],
       historyTotal: 0,
       historyLimit: 50,
@@ -77,6 +112,51 @@ describe('RecommendPage', () => {
       detailError: null,
       detailRecommendation: null,
       detailAnalysis: null,
+      fetchRecommendations: vi.fn().mockResolvedValue(undefined),
+      fetchSummary: vi.fn().mockResolvedValue(undefined),
+      fetchHotSectors: vi.fn().mockResolvedValue(true),
+      triggerRefresh: vi.fn().mockResolvedValue(undefined),
+      setFilter: vi.fn(),
+      fetchHistory: vi.fn().mockResolvedValue(undefined),
+      deleteHistoryByIds: vi.fn().mockResolvedValue(undefined),
+      openHistoryDetail: vi.fn().mockResolvedValue(undefined),
+      openLiveDetail: vi.fn().mockResolvedValue(undefined),
+      closeDetail: vi.fn(),
+    });
+
+    mockStoreState.setSelectedSectorsForMarket = vi.fn((market: string, sectors: string[]) => {
+      const normalizedMarket = String(market ?? '').trim().toUpperCase();
+      if (!normalizedMarket) {
+        return;
+      }
+      const normalizedSectors = Array.from(
+        new Set(
+          (Array.isArray(sectors) ? sectors : [])
+            .map((sector) => String(sector ?? '').trim())
+            .filter((sector) => sector.length > 0),
+        ),
+      );
+      if (normalizedSectors.length === 0) {
+        const nextSelectedSectorsByMarket = { ...mockStoreState.selectedSectorsByMarket };
+        delete nextSelectedSectorsByMarket[normalizedMarket];
+        mockStoreState.selectedSectorsByMarket = nextSelectedSectorsByMarket;
+        return;
+      }
+      mockStoreState.selectedSectorsByMarket = {
+        ...mockStoreState.selectedSectorsByMarket,
+        [normalizedMarket]: normalizedSectors,
+      };
+    });
+
+    mockStoreState.clearSelectedSectorsForMarket = vi.fn((market?: string) => {
+      const normalizedMarket = String(market ?? '').trim().toUpperCase();
+      if (!normalizedMarket) {
+        mockStoreState.selectedSectorsByMarket = {};
+        return;
+      }
+      const nextSelectedSectorsByMarket = { ...mockStoreState.selectedSectorsByMarket };
+      delete nextSelectedSectorsByMarket[normalizedMarket];
+      mockStoreState.selectedSectorsByMarket = nextSelectedSectorsByMarket;
     });
   });
 
@@ -342,13 +422,31 @@ describe('RecommendPage', () => {
     expect(mockStoreState.fetchHotSectors).not.toHaveBeenCalled();
   });
 
-  it('keeps hot-sector selection active when recommendation sectors are empty', async () => {
-    mockStoreState.filters = { market: 'CN' };
-    mockStoreState.recommendations = [];
-    mockStoreState.hotSectors = [{ name: '逆变器' }];
-    mockStoreState.hotSectorsMarket = 'CN';
+  it('restores selected sectors from market-scoped store state and keeps hidden chips visible', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.recommendations = [
+      {
+        stockCode: 'AAPL',
+        stockName: 'Apple',
+        name: 'Apple',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 12,
+        sector: 'Technology',
+        scores: {},
+        compositeScore: 88,
+        priority: 'BUY_NOW',
+        aiSummary: 'Momentum remains strong.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+    ];
+    mockStoreState.hotSectors = [{ name: 'Technology' }];
+    mockStoreState.hotSectorsMarket = 'US';
     mockStoreState.hotSectorsByMarket = {
-      CN: [{ name: '逆变器' }],
+      US: [{ name: 'Technology' }],
+    };
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['Communication Services'],
     };
 
     render(
@@ -357,7 +455,259 @@ describe('RecommendPage', () => {
       </MemoryRouter>,
     );
 
+    expect(await screen.findByTestId('sector-tag-Communication Services')).toBeInTheDocument();
+    expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('推荐');
+  });
+
+  it('restores retained selections for the active market when switching markets', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.recommendations = [
+      {
+        stockCode: 'AAPL',
+        stockName: 'Apple',
+        name: 'Apple',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 12,
+        sector: 'Technology',
+        sectors: ['Technology'],
+        sectorCanonicalKey: 'technology',
+        scores: {},
+        compositeScore: 88,
+        priority: 'BUY_NOW',
+        aiSummary: 'Momentum remains strong.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+      {
+        stockCode: '300750',
+        stockName: 'CATL',
+        name: 'CATL',
+        market: 'CN',
+        region: 'CN',
+        analysisRecordId: 13,
+        sector: '新能源',
+        sectors: ['新能源'],
+        scores: {},
+        compositeScore: 86,
+        priority: 'POSITION',
+        aiSummary: 'Battery cycle remains constructive.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+    ];
+    mockStoreState.hotSectors = [{ name: 'Technology', canonicalKey: 'technology' }];
+    mockStoreState.hotSectorsMarket = 'US';
+    mockStoreState.hotSectorsByMarket = {
+      US: [{ name: 'Technology', canonicalKey: 'technology' }],
+      CN: [{ name: '新能源' }],
+    };
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['Technology'],
+      CN: ['新能源'],
+    };
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('sector-tag-Technology')).toBeInTheDocument();
+    expect(screen.queryByTestId('sector-tag-新能源')).not.toBeInTheDocument();
+    expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('推荐');
+
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.hotSectors = [{ name: '新能源' }];
+    mockStoreState.hotSectorsMarket = 'CN';
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('sector-tag-新能源')).toBeInTheDocument();
+    expect(screen.queryByTestId('sector-tag-Technology')).not.toBeInTheDocument();
+    expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('推荐');
+
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.hotSectors = [{ name: 'Technology', canonicalKey: 'technology' }];
+    mockStoreState.hotSectorsMarket = 'US';
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('sector-tag-Technology')).toBeInTheDocument();
+    expect(screen.queryByTestId('sector-tag-新能源')).not.toBeInTheDocument();
+  });
+
+  it('applies OR filtering across selected sectors using canonical metadata', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.recommendations = [
+      {
+        stockCode: 'AAPL',
+        stockName: 'Apple',
+        name: 'Apple',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 12,
+        sector: 'Technology',
+        sectors: ['Technology'],
+        sectorCanonicalKey: 'technology',
+        scores: {},
+        compositeScore: 88,
+        priority: 'BUY_NOW',
+        aiSummary: 'Momentum remains strong.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+      {
+        stockCode: 'META',
+        stockName: 'Meta',
+        name: 'Meta',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 13,
+        sector: 'Communication Services',
+        sectors: ['Communication Services'],
+        sectorCanonicalKey: 'communicationservices',
+        sectorAliases: ['communication services'],
+        scores: {},
+        compositeScore: 86,
+        priority: 'POSITION',
+        aiSummary: 'Platform engagement stabilizing.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+      {
+        stockCode: 'JPM',
+        stockName: 'JPMorgan',
+        name: 'JPMorgan',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 14,
+        sector: 'Financials',
+        sectors: ['Financials'],
+        sectorCanonicalKey: 'financials',
+        scores: {},
+        compositeScore: 80,
+        priority: 'WAIT_PULLBACK',
+        aiSummary: 'Range-bound setup.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+    ];
+    mockStoreState.hotSectors = [
+      { name: 'Technology', canonicalKey: 'technology' },
+      { name: 'Communication Services', canonicalKey: 'communicationservices', aliases: ['communication services'] },
+    ];
+    mockStoreState.hotSectorsMarket = 'US';
+    mockStoreState.hotSectorsByMarket = {
+      US: [
+        { name: 'Technology', canonicalKey: 'technology' },
+        { name: 'Communication Services', canonicalKey: 'communicationservices', aliases: ['communication services'] },
+      ],
+    };
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['Technology', 'communicationservices'],
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('table-row-AAPL')).toBeInTheDocument();
+    expect(screen.getByTestId('table-row-META')).toBeInTheDocument();
+    expect(screen.queryByTestId('table-row-JPM')).not.toBeInTheDocument();
+  });
+
+  it('sends sectors[] during manual refresh when market has active selections', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['Technology', 'Semiconductors'],
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    const hotSectorsCallCountBeforeRefresh = mockStoreState.fetchHotSectors.mock.calls.length;
+
+    fireEvent.click(screen.getByTestId('manual-refresh-button'));
+
+    await waitFor(() => {
+      expect(mockStoreState.triggerRefresh).toHaveBeenCalledWith({
+        market: 'US',
+        sector: 'Technology',
+        sectors: ['Technology', 'Semiconductors'],
+      });
+    });
+    expect(mockStoreState.fetchHotSectors).toHaveBeenCalledTimes(hotSectorsCallCountBeforeRefresh);
+  });
+
+  it('keeps smart refresh flow when no sectors are selected for market', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.selectedSectorsByMarket = {};
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('manual-refresh-button'));
+
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('US');
+      expect(mockStoreState.triggerRefresh).toHaveBeenCalledWith({ market: 'US' });
+    });
+  });
+
+  it('updates store-managed market sector selection when toggling chips', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [{ name: '逆变器' }, { name: '算力' }];
+    mockStoreState.hotSectorsMarket = 'CN';
+    mockStoreState.hotSectorsByMarket = {
+      CN: [{ name: '逆变器' }, { name: '算力' }],
+    };
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
     fireEvent.click(await screen.findByTestId('sector-tag-逆变器'));
+
+    expect(mockStoreState.setSelectedSectorsForMarket).toHaveBeenCalledWith('CN', ['逆变器']);
+
+    mockStoreState.selectedSectorsByMarket = {
+      CN: ['逆变器'],
+    };
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByTestId('sector-tag-算力'));
+
+    expect(mockStoreState.setSelectedSectorsForMarket).toHaveBeenCalledWith('CN', ['逆变器', '算力']);
+
+    mockStoreState.selectedSectorsByMarket = {
+      CN: ['逆变器', '算力'],
+    };
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
 
     await waitFor(() => {
       expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('推荐');
@@ -365,8 +715,100 @@ describe('RecommendPage', () => {
 
     fireEvent.click(screen.getByTestId('sector-tag-逆变器'));
 
-    await waitFor(() => {
-      expect(screen.getByTestId('manual-refresh-button')).toHaveTextContent('智能推荐');
-    });
+    expect(mockStoreState.setSelectedSectorsForMarket).toHaveBeenCalledWith('CN', ['算力']);
+  });
+
+  it('renders one visible chip for canonical aliases across hot sectors, recommendations, and selections', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.recommendations = [
+      {
+        stockCode: 'META',
+        stockName: 'Meta',
+        name: 'Meta',
+        market: 'US',
+        region: 'US',
+        analysisRecordId: 12,
+        sector: 'Communication Services',
+        sectors: ['Communication Services'],
+        sectorCanonicalKey: 'communicationservices',
+        sectorAliases: ['communication services', 'communications'],
+        scores: {},
+        compositeScore: 88,
+        priority: 'BUY_NOW',
+        aiSummary: 'Engagement remains resilient.',
+        updatedAt: '2026-03-21T08:00:00Z',
+      },
+    ];
+    mockStoreState.hotSectors = [
+      {
+        name: 'Communication Services',
+        canonicalKey: 'communicationservices',
+        displayLabel: 'Communication Services',
+        aliases: ['communication services', 'communications'],
+      },
+    ];
+    mockStoreState.hotSectorsMarket = 'US';
+    mockStoreState.hotSectorsByMarket = {
+      US: [
+        {
+          name: 'Communication Services',
+          canonicalKey: 'communicationservices',
+          displayLabel: 'Communication Services',
+          aliases: ['communication services', 'communications'],
+        },
+      ],
+    };
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['communications'],
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('sector-tag-Communication Services')).toBeInTheDocument();
+    expect(screen.queryAllByTestId('sector-tag-Communication Services')).toHaveLength(1);
+    expect(screen.queryByTestId('sector-tag-communications')).not.toBeInTheDocument();
+  });
+
+  it('removes the selected store canonical token instead of adding display label when chip clicked', async () => {
+    mockStoreState.filters = { market: 'US' };
+    mockStoreState.recommendations = [];
+    mockStoreState.hotSectors = [
+      { name: 'Communication Services', canonicalKey: 'communicationservices', aliases: ['communication services'] }
+    ];
+    mockStoreState.hotSectorsMarket = 'US';
+    mockStoreState.hotSectorsByMarket = {
+      US: [{ name: 'Communication Services', canonicalKey: 'communicationservices', aliases: ['communication services'] }],
+    };
+    
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['communicationservices'],
+    };
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByTestId('sector-tag-Communication Services'));
+
+    expect(mockStoreState.clearSelectedSectorsForMarket).toHaveBeenCalledWith('US');
+
+    mockStoreState.selectedSectorsByMarket = {
+      US: ['communicationservices', 'technology'],
+    };
+
+    rerender(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByTestId('sector-tag-Communication Services'));
+    expect(mockStoreState.setSelectedSectorsForMarket).toHaveBeenCalledWith('US', ['technology']);
   });
 });

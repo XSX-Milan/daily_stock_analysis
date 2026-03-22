@@ -21,6 +21,22 @@ class RecommendationResponse(BaseModel):
     market: str = Field(..., description="Market region code")
     region: str | None = Field(None, description="Legacy alias for market region code")
     sector: str | None = Field(None, description="Sector name")
+    sectors: list[str] = Field(
+        default_factory=list,
+        description="Normalized sector list for canonical multi-sector compatibility",
+    )
+    canonical_key: str | None = Field(
+        None,
+        description="Canonical sector dedupe key",
+    )
+    display_label: str | None = Field(
+        None,
+        description="Canonical display label for sector rendering",
+    )
+    aliases: list[str] = Field(
+        default_factory=list,
+        description="Known alias labels for the canonical sector",
+    )
     scores: dict[str, float] = Field(
         default_factory=dict, description="Dimension scores"
     )
@@ -39,6 +55,27 @@ class RecommendationResponse(BaseModel):
         None, description="Linked analysis history record ID"
     )
     updated_at: datetime = Field(..., description="Last update timestamp")
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.sectors and self.sector:
+            self.sectors = [self.sector]
+        if not self.display_label and self.sector:
+            self.display_label = self.sector
+        if not self.canonical_key and self.display_label:
+            self.canonical_key = "".join(self.display_label.strip().casefold().split())
+        if not self.aliases:
+            candidates = [
+                *self.sectors,
+                self.sector,
+                self.display_label,
+                self.canonical_key,
+            ]
+            normalized: list[str] = []
+            for raw_value in candidates:
+                value = str(raw_value or "").strip()
+                if value and value not in normalized:
+                    normalized.append(value)
+            self.aliases = normalized
 
 
 class RecommendationListResponse(BaseModel):
@@ -64,6 +101,10 @@ class RecommendationHistoryItemResponse(BaseModel):
     code: str = Field(..., description="Stock code")
     name: str = Field(..., description="Stock name")
     sector: str | None = Field(None, description="Sector name")
+    sectors: list[str] = Field(
+        default_factory=list,
+        description="Normalized sector list for canonical multi-sector compatibility",
+    )
     composite_score: float = Field(..., description="Composite score")
     priority: str = Field(..., description="Recommendation priority")
     recommendation_date: str | None = Field(None, description="Recommendation date")
@@ -73,6 +114,10 @@ class RecommendationHistoryItemResponse(BaseModel):
     )
     region: str = Field(..., description="Market region code")
     market: str = Field(..., description="Legacy alias for market region code")
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.sectors and self.sector:
+            self.sectors = [self.sector]
 
 
 class RecommendationHistoryListResponse(BaseModel):
@@ -113,8 +158,33 @@ class HotSectorItemResponse(BaseModel):
     """Response schema for one hot-sector item."""
 
     name: str = Field(..., description="Sector name")
+    canonical_key: str | None = Field(None, description="Canonical dedupe key")
+    display_label: str | None = Field(
+        None, description="Canonical display label for the sector"
+    )
+    aliases: list[str] = Field(
+        default_factory=list, description="Known alias labels for the canonical sector"
+    )
+    raw_name: str | None = Field(
+        None, description="Raw provider sector label used for tracing"
+    )
+    source: str | None = Field(None, description="Source provider identifier")
     change_pct: float | None = Field(None, description="Sector change percentage")
     stock_count: int | None = Field(None, description="Stock count in sector")
+    snapshot_at: datetime | None = Field(
+        None, description="Snapshot freshness timestamp"
+    )
+    fetched_at: datetime | None = Field(
+        None, description="Server snapshot persistence timestamp"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.display_label and self.name:
+            self.display_label = self.name
+        if self.display_label and not self.name:
+            self.name = self.display_label
+        if not self.raw_name and self.name:
+            self.raw_name = self.name
 
 
 class HotSectorListResponse(BaseModel):
@@ -132,27 +202,54 @@ class RefreshRequest(BaseModel):
         description="Optional stock code list",
     )
     force: bool = Field(False, description="Force refresh switch")
-    market: str | None = Field(
-        None,
+    market: str = Field(
+        ...,
         validation_alias=AliasChoices("market", "region"),
-        description="Required market region code for scoped refresh",
+        description="Required market region code for refresh scope",
     )
     sector: str | None = Field(
         None,
         validation_alias=AliasChoices("sector", "industry"),
         description="Required sector name for scoped refresh",
     )
+    sectors: list[str] | None = Field(
+        None,
+        validation_alias=AliasChoices("sectors"),
+        description="Canonical multi-sector input for scoped refresh",
+    )
 
-    def require_refresh_scope(self) -> tuple[str, str]:
-        market = str(self.market or "").strip()
+    def normalized_sectors(self) -> list[str]:
+        normalized: list[str] = []
+
+        for raw_value in self.sectors or []:
+            value = str(raw_value).strip()
+            if value and value not in normalized:
+                normalized.append(value)
+
+        if not normalized and self.sector is not None:
+            legacy_sector = str(self.sector).strip()
+            if legacy_sector:
+                normalized.append(legacy_sector)
+
+        return normalized
+
+    def has_sector_scope(self) -> bool:
+        if self.sector is not None:
+            return True
+        if self.sectors is None:
+            return False
+        return len(self.sectors) > 0
+
+    def require_refresh_scope(self) -> tuple[str, list[str] | None]:
+        market = str(self.market).strip()
         if not market:
             raise ValueError("market is required before selecting sector")
 
-        sector = str(self.sector or "").strip()
-        if not sector:
+        sectors = self.normalized_sectors()
+        if self.has_sector_scope() and not sectors:
             raise ValueError("sector is required when market is provided")
 
-        return market, sector
+        return market, sectors or None
 
 
 class WatchlistItemResponse(BaseModel):

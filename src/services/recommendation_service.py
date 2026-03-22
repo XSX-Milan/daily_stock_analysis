@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Iterable, cast
 
 import pandas as pd
 from sqlalchemy import desc, select
@@ -55,6 +55,7 @@ class RecommendationService:
 
     SECTOR_CACHE_TYPE = "industry"
     AUTO_REFRESH_SECTOR_LIMIT = 3
+    HOT_SECTOR_SNAPSHOT_TTL_MINUTES = 30
     SCORING_WEIGHT_CONFIG_MAPPING: tuple[tuple[str, str, str, int], ...] = (
         ("technical", "RECOMMEND_WEIGHT_TECHNICAL", "recommend_weight_technical", 30),
         (
@@ -186,10 +187,20 @@ class RecommendationService:
         force: bool = False,
         market: str | MarketRegion | None = None,
         sector: str | None = None,
+        sectors: Iterable[str] | None = None,
     ) -> list[StockRecommendation]:
         """Refresh recommendations for sector scan results and watchlist stocks."""
         target_region = self._parse_market_region(market)
-        if sector is None:
+        if sector is not None and not str(sector).strip():
+            raw_multi_sectors = self._repo_normalize_sector_inputs(sectors=sectors)
+            if not raw_multi_sectors:
+                raise ValueError("sector is required for recommendation refresh")
+
+        requested_sectors = self._normalize_sector_inputs(
+            sector=sector,
+            sectors=sectors,
+        )
+        if not requested_sectors:
             target_sectors, used_ranking_fallback = (
                 self._resolve_auto_refresh_sectors_with_source(target_region)
             )
@@ -253,14 +264,34 @@ class RecommendationService:
                 force=force,
             )
 
-        target_sector = str(sector).strip()
-        if not target_sector:
-            raise ValueError("sector is required for recommendation refresh")
+        if len(requested_sectors) == 1:
+            return self._refresh_all_for_sector(
+                force=force,
+                target_region=target_region,
+                target_sector=requested_sectors[0],
+            )
 
-        return self._refresh_all_for_sector(
+        merged_sector_by_code: dict[str, str] = {}
+        merged_codes: list[str] = []
+
+        for target_sector in requested_sectors:
+            combined_codes, sector_by_code = self._collect_sector_universe(
+                target_region=target_region,
+                target_sector=target_sector,
+            )
+            for code in combined_codes:
+                if code in merged_sector_by_code:
+                    continue
+                merged_codes.append(code)
+                merged_sector_by_code[code] = sector_by_code.get(code) or target_sector
+
+        if not merged_codes:
+            return []
+
+        return self.refresh_stocks(
+            merged_codes,
+            sector_by_code=merged_sector_by_code,
             force=force,
-            target_region=target_region,
-            target_sector=target_sector,
         )
 
     def _resolve_auto_refresh_sectors(self, region: MarketRegion) -> list[str]:
@@ -429,9 +460,11 @@ class RecommendationService:
         target_sector: str,
         limit: int,
     ) -> list[str]:
+        sector_candidates = self._build_sector_query_candidates(sector=target_sector)
         try:
             rows = self.recommendation_repo.get_list(
-                sector=target_sector,
+                sector=None,
+                sectors=sector_candidates,
                 region=target_region,
                 limit=max(1, int(limit)),
                 offset=0,
@@ -518,19 +551,28 @@ class RecommendationService:
         """Refresh recommendations for the provided stock code list."""
         normalized_codes = [str(code).strip() for code in codes if str(code).strip()]
         deduplicated_codes = list(dict.fromkeys(normalized_codes))
-        if market is not None or sector is not None:
-            if not str(market or "").strip():
-                raise ValueError("market is required before selecting sector")
-            if not str(sector or "").strip():
-                raise ValueError("sector is required when market is provided")
+        market_scope = (
+            str(getattr(market, "value", market) or "").strip()
+            if market is not None
+            else ""
+        )
+        if sector is not None and not market_scope:
+            raise ValueError("market is required before selecting sector")
 
+        if market is not None:
+            if not market_scope:
+                raise ValueError("market is required before selecting sector")
             target_region = self._parse_market_region(market)
-            target_sector = str(sector).strip()
             deduplicated_codes = [
                 code
                 for code in deduplicated_codes
                 if detect_market_region(code) == target_region
             ]
+
+        if sector is not None:
+            target_sector = str(sector).strip()
+            if not target_sector:
+                raise ValueError("sector is required when market is provided")
             deduplicated_codes = self._filter_codes_by_sector(
                 deduplicated_codes,
                 target_sector,
@@ -561,9 +603,9 @@ class RecommendationService:
             )
 
         normalized_sector_input = {
-            str(code).strip(): str(value).strip()
+            str(code).strip(): self._canonical_sector_label(value)
             for code, value in (sector_by_code or {}).items()
-            if str(code).strip() and str(value).strip()
+            if str(code).strip() and self._canonical_sector_label(value)
         }
 
         resolved_sector_by_code = self._resolve_sector_mapping(
@@ -667,7 +709,9 @@ class RecommendationService:
                 continue
             self._apply_ai_threshold_override(code, composite_score)
             payload = payload_by_code[code]
-            sector_value = normalized_sector_by_code.get(code) or payload.get("sector")
+            sector_value = self._canonical_sector_label(
+                normalized_sector_by_code.get(code) or payload.get("sector")
+            )
             new_recommendations.append(
                 StockRecommendation(
                     code=code,
@@ -865,14 +909,250 @@ class RecommendationService:
         except ValueError as exc:
             raise ValueError(f"Invalid market region: {value}") from exc
 
+    def _repo_normalize_sector_inputs(
+        self,
+        sector: str | None = None,
+        sectors: Iterable[str] | None = None,
+    ) -> list[str]:
+        normalizer = getattr(self.recommendation_repo, "normalize_sector_inputs", None)
+        if callable(normalizer):
+            try:
+                normalized = normalizer(sector=sector, sectors=sectors)
+            except TypeError:
+                try:
+                    normalized = normalizer(sector, sectors)
+                except Exception:
+                    normalized = None
+            except Exception:
+                normalized = None
+            if isinstance(normalized, list):
+                return [
+                    value
+                    for value in RecommendationRepository.normalize_sector_inputs(
+                        sectors=normalized
+                    )
+                ]
+
+        return RecommendationRepository.normalize_sector_inputs(
+            sector=sector,
+            sectors=sectors,
+        )
+
+    def _normalize_sector_inputs(
+        self,
+        sector: str | None = None,
+        sectors: Iterable[str] | None = None,
+    ) -> list[str]:
+        raw_inputs = self._repo_normalize_sector_inputs(
+            sector=sector,
+            sectors=sectors,
+        )
+        normalized: list[str] = []
+        seen_keys: set[str] = set()
+
+        for raw_value in raw_inputs:
+            value = str(raw_value or "").strip()
+            if not value:
+                continue
+
+            metadata = self._normalize_sector_metadata(value)
+            dedupe_key = str(metadata.get("canonical_key") or "").strip()
+            if not dedupe_key:
+                dedupe_key = self._normalize_sector_name(value)
+            if not dedupe_key:
+                continue
+            if dedupe_key in seen_keys:
+                continue
+
+            seen_keys.add(dedupe_key)
+            normalized.append(value)
+
+        return normalized
+
+    def _build_sector_query_candidates(
+        self,
+        sector: str | None = None,
+        sectors: Iterable[str] | None = None,
+    ) -> list[str]:
+        requested_sectors = self._normalize_sector_inputs(
+            sector=sector, sectors=sectors
+        )
+        if not requested_sectors:
+            return []
+
+        candidates: list[str] = []
+        for requested in requested_sectors:
+            metadata = self._normalize_sector_metadata(requested)
+            candidate_values = [
+                requested,
+                str(metadata.get("display_label") or "").strip(),
+                str(metadata.get("canonical_key") or "").strip(),
+                *[
+                    str(alias).strip()
+                    for alias in (metadata.get("aliases") or [])
+                    if str(alias).strip()
+                ],
+            ]
+            candidates.extend(candidate_values)
+
+        return self._repo_normalize_sector_inputs(sectors=candidates)
+
+    def _normalize_sector_metadata(self, value: object) -> dict[str, Any]:
+        scanner_cls = type(self.sector_scanner_service)
+        candidate_normalizers: list[Any] = []
+
+        class_normalizer = getattr(scanner_cls, "_normalize_sector_metadata", None)
+        if callable(class_normalizer):
+            candidate_normalizers.append(class_normalizer)
+
+        instance_normalizer = getattr(
+            self.sector_scanner_service,
+            "_normalize_sector_metadata",
+            None,
+        )
+        if callable(instance_normalizer):
+            candidate_normalizers.append(instance_normalizer)
+
+        try:
+            from src.services.sector_scanner_service import (
+                SectorScannerService as CanonicalSectorScannerService,
+            )
+
+            canonical_normalizer = getattr(
+                CanonicalSectorScannerService,
+                "_normalize_sector_metadata",
+                None,
+            )
+            if callable(canonical_normalizer):
+                candidate_normalizers.append(canonical_normalizer)
+        except Exception:
+            pass
+
+        for normalizer in candidate_normalizers:
+            try:
+                metadata = normalizer(value)
+            except Exception:
+                continue
+            if not isinstance(metadata, dict):
+                continue
+
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            display_label = str(metadata.get("display_label") or "").strip()
+            raw_provider_label = str(
+                metadata.get("raw_provider_label") or value or ""
+            ).strip()
+            aliases = self._repo_normalize_sector_inputs(
+                sectors=metadata.get("aliases") or []
+            )
+            if canonical_key and canonical_key not in aliases:
+                aliases.append(canonical_key)
+            return {
+                "canonical_key": canonical_key,
+                "display_label": display_label or raw_provider_label,
+                "aliases": aliases,
+                "raw_provider_label": raw_provider_label,
+            }
+
+        raw_label = str(value or "").strip()
+        normalized_key = self._normalize_sector_name(raw_label)
+        aliases = [normalized_key] if normalized_key else []
+        return {
+            "canonical_key": normalized_key,
+            "display_label": raw_label or normalized_key,
+            "aliases": aliases,
+            "raw_provider_label": raw_label,
+        }
+
+    def _match_sector_metadata(
+        self,
+        target: str,
+        provider_value: object,
+    ) -> dict[str, Any]:
+        scanner_cls = type(self.sector_scanner_service)
+        candidate_matchers: list[Any] = []
+
+        class_matcher = getattr(scanner_cls, "_match_sector_metadata", None)
+        if callable(class_matcher):
+            candidate_matchers.append(class_matcher)
+
+        instance_matcher = getattr(
+            self.sector_scanner_service,
+            "_match_sector_metadata",
+            None,
+        )
+        if callable(instance_matcher):
+            candidate_matchers.append(instance_matcher)
+
+        try:
+            from src.services.sector_scanner_service import (
+                SectorScannerService as CanonicalSectorScannerService,
+            )
+
+            canonical_matcher = getattr(
+                CanonicalSectorScannerService,
+                "_match_sector_metadata",
+                None,
+            )
+            if callable(canonical_matcher):
+                candidate_matchers.append(canonical_matcher)
+        except Exception:
+            pass
+
+        for matcher in candidate_matchers:
+            try:
+                match_result = matcher(target, provider_value)
+            except Exception:
+                continue
+            if isinstance(match_result, dict):
+                return match_result
+
+        target_metadata = self._normalize_sector_metadata(target)
+        provider_metadata = self._normalize_sector_metadata(provider_value)
+        target_aliases = set(target_metadata.get("aliases") or [])
+        provider_key = str(provider_metadata.get("canonical_key") or "").strip()
+        matched = bool(provider_key) and (
+            provider_key in target_aliases
+            or any(
+                alias in provider_key or provider_key in alias
+                for alias in target_aliases
+            )
+        )
+        return {
+            "canonical_key": target_metadata.get("canonical_key"),
+            "display_label": target_metadata.get("display_label"),
+            "aliases": target_metadata.get("aliases"),
+            "raw_provider_label": provider_metadata.get("raw_provider_label"),
+            "provider_canonical_key": provider_key,
+            "matched": matched,
+        }
+
+    def _canonical_sector_label(self, value: object) -> str:
+        metadata = self._normalize_sector_metadata(value)
+        canonical_label = str(metadata.get("display_label") or "").strip()
+        if canonical_label:
+            return canonical_label
+        return str(value or "").strip()
+
     def _filter_codes_by_sector(
         self,
         codes: list[str],
         sector: str,
         sector_by_code: dict[str, str] | None = None,
     ) -> list[str]:
-        target = str(sector or "").strip().casefold()
-        if not target:
+        return self._filter_codes_by_sectors(
+            codes,
+            sectors=[sector],
+            sector_by_code=sector_by_code,
+        )
+
+    def _filter_codes_by_sectors(
+        self,
+        codes: list[str],
+        sectors: Iterable[str],
+        sector_by_code: dict[str, str] | None = None,
+    ) -> list[str]:
+        target_sectors = self._normalize_sector_inputs(sectors=sectors)
+        if not target_sectors:
             return list(codes)
 
         known_sectors = {
@@ -892,7 +1172,14 @@ class RecommendationService:
                 cached = self.recommendation_repo.get_latest(normalized_code)
                 candidate_sector = cached.sector if cached is not None else None
 
-            if str(candidate_sector or "").strip().casefold() == target:
+            if any(
+                bool(
+                    self._match_sector_metadata(target_sector, candidate_sector).get(
+                        "matched"
+                    )
+                )
+                for target_sector in target_sectors
+            ):
                 matched.append(normalized_code)
 
         return matched
@@ -1002,9 +1289,9 @@ class RecommendationService:
         sector_by_code: dict[str, str] | None,
     ) -> dict[str, str]:
         normalized_input = {
-            str(code).strip(): str(sector).strip()
+            str(code).strip(): self._canonical_sector_label(sector)
             for code, sector in (sector_by_code or {}).items()
-            if str(code).strip() and str(sector).strip()
+            if str(code).strip() and self._canonical_sector_label(sector)
         }
 
         resolved: dict[str, str] = {}
@@ -1027,7 +1314,9 @@ class RecommendationService:
 
             sector_info = self.sector_cache_service.get_or_fetch_sector(normalized_code)
             if sector_info and sector_info.sector_name:
-                resolved[normalized_code] = sector_info.sector_name
+                resolved[normalized_code] = self._canonical_sector_label(
+                    sector_info.sector_name
+                )
 
         return resolved
 
@@ -1062,21 +1351,28 @@ class RecommendationService:
         self,
         priority: str | None = None,
         sector: str | None = None,
+        sectors: Iterable[str] | None = None,
         region: str | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> tuple[list[StockRecommendation], int]:
         """Return filtered recommendation items and the total count."""
+        sector_candidates = self._build_sector_query_candidates(
+            sector=sector,
+            sectors=sectors,
+        )
         items = self.recommendation_repo.get_list(
             priority=priority,
-            sector=sector,
+            sector=None,
+            sectors=sector_candidates,
             region=region,
             limit=limit,
             offset=offset,
         )
         total = self.recommendation_repo.get_count(
             priority=priority,
-            sector=sector,
+            sector=None,
+            sectors=sector_candidates,
             region=region,
         )
         return items, total
@@ -1254,15 +1550,79 @@ class RecommendationService:
         if target_market not in {"CN", "HK", "US"}:
             raise ValueError(f"Unsupported market: {target_market}")
 
+        snapshot = self.recommendation_repo.get_hot_sector_snapshot(
+            target_market,
+            ttl_minutes=self.HOT_SECTOR_SNAPSHOT_TTL_MINUTES,
+            include_stale=True,
+        )
+        if snapshot and not bool(snapshot.get("is_stale")):
+            return self._canonicalize_hot_sector_items(
+                snapshot.get("items") or [],
+                market=target_market,
+                snapshot_at=snapshot.get("snapshot_at"),
+                fetched_at=snapshot.get("fetched_at"),
+            )
+
+        stale_snapshot_items: list[dict[str, Any]] = []
+        if snapshot:
+            stale_snapshot_items = self._canonicalize_hot_sector_items(
+                snapshot.get("items") or [],
+                market=target_market,
+                snapshot_at=snapshot.get("snapshot_at"),
+                fetched_at=snapshot.get("fetched_at"),
+            )
+
+        try:
+            raw_items = self._fetch_hot_sector_items_from_upstream(target_market)
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh hot-sector snapshot for market=%s: %s",
+                target_market,
+                exc,
+            )
+            raw_items = []
+
+        if raw_items:
+            snapshot_at = datetime.utcnow()
+            fresh_items = self._canonicalize_hot_sector_items(
+                raw_items,
+                market=target_market,
+                snapshot_at=snapshot_at,
+            )
+            if fresh_items:
+                try:
+                    self.recommendation_repo.upsert_hot_sector_snapshot(
+                        market=target_market,
+                        sectors=fresh_items,
+                        snapshot_at=snapshot_at,
+                        fetched_at=datetime.utcnow(),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist hot-sector snapshot for market=%s: %s",
+                        target_market,
+                        exc,
+                    )
+                return fresh_items
+
+        return stale_snapshot_items
+
+    def _fetch_hot_sector_items_from_upstream(
+        self,
+        target_market: str,
+    ) -> list[dict[str, Any]]:
         if target_market in {"HK", "US"}:
             fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
             return [
                 {
-                    "name": name,
+                    "name": str(name or "").strip(),
+                    "raw_name": str(name or "").strip(),
                     "change_pct": None,
                     "stock_count": len(codes),
+                    "source": "overseas_fallback",
                 }
                 for name, codes in fallback.items()
+                if str(name or "").strip()
             ]
 
         scanned: list[tuple[str, list[str]]] = []
@@ -1271,7 +1631,7 @@ class RecommendationService:
         except Exception as exc:
             logger.warning("Failed to scan CN hot sectors: %s", exc)
 
-        change_pct_by_sector: dict[str, float] = {}
+        change_pct_by_canonical: dict[str, float] = {}
         ranking_sector_names: list[str] = []
         ranking_sector_keys: set[str] = set()
         fetcher = getattr(self.sector_scanner_service, "data_fetcher", None)
@@ -1284,17 +1644,18 @@ class RecommendationService:
                 if not name:
                     continue
 
-                normalized_name = self._normalize_sector_name(name)
-                if not normalized_name:
+                metadata = self._normalize_sector_metadata(name)
+                canonical_key = str(metadata.get("canonical_key") or "").strip()
+                if not canonical_key:
                     continue
 
-                if normalized_name not in ranking_sector_keys:
+                if canonical_key not in ranking_sector_keys:
                     ranking_sector_names.append(name)
-                    ranking_sector_keys.add(normalized_name)
+                    ranking_sector_keys.add(canonical_key)
 
                 change_pct = self._extract_sector_change_pct(item)
                 if change_pct is not None:
-                    change_pct_by_sector[normalized_name] = change_pct
+                    change_pct_by_canonical[canonical_key] = change_pct
         except Exception as exc:
             logger.warning("Failed to fetch CN sector rankings: %s", exc)
 
@@ -1304,16 +1665,22 @@ class RecommendationService:
                 name = str(sector_name or "").strip()
                 if not name:
                     continue
+                canonical_key = str(
+                    self._normalize_sector_metadata(name).get("canonical_key") or ""
+                ).strip()
+                if not canonical_key:
+                    continue
+
                 stock_count = (
                     len(stock_codes) if isinstance(stock_codes, list) else None
                 )
                 sectors.append(
                     {
                         "name": name,
+                        "raw_name": name,
                         "stock_count": stock_count,
-                        "change_pct": change_pct_by_sector.get(
-                            self._normalize_sector_name(name)
-                        ),
+                        "change_pct": change_pct_by_canonical.get(canonical_key),
+                        "source": "sector_scan",
                     }
                 )
         else:
@@ -1321,14 +1688,175 @@ class RecommendationService:
                 sectors.append(
                     {
                         "name": name,
+                        "raw_name": name,
                         "stock_count": None,
-                        "change_pct": change_pct_by_sector.get(
-                            self._normalize_sector_name(name)
+                        "change_pct": change_pct_by_canonical.get(
+                            str(
+                                self._normalize_sector_metadata(name).get(
+                                    "canonical_key"
+                                )
+                                or ""
+                            ).strip()
                         ),
+                        "source": "sector_rankings",
                     }
                 )
 
         return sectors
+
+    def _canonicalize_hot_sector_items(
+        self,
+        items: Iterable[dict[str, Any]],
+        *,
+        market: str,
+        snapshot_at: datetime | None = None,
+        fetched_at: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        merged_by_canonical: dict[str, dict[str, Any]] = {}
+        ordered_keys: list[str] = []
+
+        for item in items:
+            normalized = self._canonicalize_hot_sector_item(
+                item,
+                market=market,
+                snapshot_at=snapshot_at,
+                fetched_at=fetched_at,
+            )
+            canonical_key = str(normalized.get("canonical_key") or "").strip()
+            if not canonical_key:
+                continue
+
+            existing = merged_by_canonical.get(canonical_key)
+            if existing is None:
+                merged_by_canonical[canonical_key] = normalized
+                ordered_keys.append(canonical_key)
+                continue
+
+            merged_aliases = self._repo_normalize_sector_inputs(
+                sectors=[
+                    *cast(list[str], existing.get("aliases") or []),
+                    *cast(list[str], normalized.get("aliases") or []),
+                ]
+            )
+            existing["aliases"] = merged_aliases
+            if (
+                existing.get("change_pct") is None
+                and normalized.get("change_pct") is not None
+            ):
+                existing["change_pct"] = normalized.get("change_pct")
+            if (
+                existing.get("stock_count") is None
+                and normalized.get("stock_count") is not None
+            ):
+                existing["stock_count"] = normalized.get("stock_count")
+            if str(existing.get("source") or "").strip() == "":
+                existing["source"] = normalized.get("source")
+            if str(existing.get("raw_name") or "").strip() == "":
+                existing["raw_name"] = normalized.get("raw_name")
+
+        normalized_items = [merged_by_canonical[key] for key in ordered_keys]
+
+        def _sort_key(item: dict[str, Any]) -> tuple[float, int, str]:
+            raw_change_pct = item.get("change_pct")
+            if isinstance(raw_change_pct, (int, float)):
+                change_pct_rank = float(raw_change_pct)
+            elif isinstance(raw_change_pct, str):
+                try:
+                    change_pct_rank = float(raw_change_pct)
+                except (TypeError, ValueError):
+                    change_pct_rank = float(-(10**9))
+            else:
+                change_pct_rank = float(-(10**9))
+
+            raw_stock_count = item.get("stock_count")
+            if isinstance(raw_stock_count, bool):
+                stock_count_rank = int(raw_stock_count)
+            elif isinstance(raw_stock_count, int):
+                stock_count_rank = raw_stock_count
+            elif isinstance(raw_stock_count, float):
+                stock_count_rank = int(raw_stock_count)
+            elif isinstance(raw_stock_count, str):
+                try:
+                    stock_count_rank = int(raw_stock_count)
+                except (TypeError, ValueError):
+                    stock_count_rank = -1
+            else:
+                stock_count_rank = -1
+
+            return (
+                -change_pct_rank,
+                -stock_count_rank,
+                str(item.get("canonical_key") or ""),
+            )
+
+        return sorted(
+            normalized_items,
+            key=_sort_key,
+        )
+
+    def _canonicalize_hot_sector_item(
+        self,
+        item: dict[str, Any],
+        *,
+        market: str,
+        snapshot_at: datetime | None = None,
+        fetched_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        raw_name = str(
+            item.get("raw_name") or item.get("name") or item.get("display_label") or ""
+        ).strip()
+        metadata = self._normalize_sector_metadata(
+            item.get("canonical_key") or raw_name or item.get("display_label")
+        )
+        canonical_key = str(metadata.get("canonical_key") or "").strip()
+        display_label = str(
+            item.get("display_label")
+            or metadata.get("display_label")
+            or raw_name
+            or canonical_key
+        ).strip()
+        canonical_name = str(display_label or item.get("name") or raw_name).strip()
+        aliases = self._repo_normalize_sector_inputs(
+            sectors=[
+                *(item.get("aliases") or []),
+                *(metadata.get("aliases") or []),
+                canonical_key,
+                display_label,
+                raw_name,
+            ]
+        )
+
+        normalized_change_pct = self._extract_sector_change_pct(item)
+        raw_stock_count = item.get("stock_count")
+        try:
+            stock_count = int(raw_stock_count) if raw_stock_count is not None else None
+        except (TypeError, ValueError):
+            stock_count = None
+
+        item_snapshot_at = item.get("snapshot_at")
+        resolved_snapshot_at = (
+            item_snapshot_at
+            if isinstance(item_snapshot_at, datetime)
+            else snapshot_at or datetime.utcnow()
+        )
+        item_fetched_at = item.get("fetched_at")
+        resolved_fetched_at = (
+            item_fetched_at if isinstance(item_fetched_at, datetime) else fetched_at
+        )
+
+        return {
+            "market": str(market or "").strip().upper(),
+            "name": canonical_name or display_label or canonical_key,
+            "canonical_key": canonical_key,
+            "display_label": display_label or canonical_key,
+            "aliases": aliases,
+            "raw_name": raw_name or display_label or canonical_key,
+            "source": str(item.get("source") or "").strip(),
+            "change_pct": normalized_change_pct,
+            "stock_count": stock_count,
+            "snapshot_at": resolved_snapshot_at,
+            "fetched_at": resolved_fetched_at,
+        }
 
     def get_watchlist_items(
         self,

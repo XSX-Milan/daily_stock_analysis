@@ -25,30 +25,6 @@ _OVERSEAS_SECTOR_FALLBACK: dict[str, dict[str, list[str]]] = {
             "HK02015",
             "HK09868",
         ],
-        "tech": [
-            "HK00700",
-            "HK03690",
-            "HK01810",
-            "HK01024",
-            "HK00981",
-            "HK09988",
-            "HK09618",
-            "HK09888",
-            "HK02015",
-            "HK09868",
-        ],
-        "\u79d1\u6280": [
-            "HK00700",
-            "HK03690",
-            "HK01810",
-            "HK01024",
-            "HK00981",
-            "HK09988",
-            "HK09618",
-            "HK09888",
-            "HK02015",
-            "HK09868",
-        ],
     },
     "US": {
         "technology": [
@@ -61,38 +37,45 @@ _OVERSEAS_SECTOR_FALLBACK: dict[str, dict[str, list[str]]] = {
             "GOOG",
             "META",
         ],
-        "tech": [
-            "AAPL",
-            "MSFT",
-            "NVDA",
-            "AMD",
-            "INTC",
-            "GOOGL",
-            "GOOG",
-            "META",
-        ],
         "communicationservices": ["META", "GOOGL", "GOOG"],
-        "\u79d1\u6280": [
-            "AAPL",
-            "MSFT",
-            "NVDA",
-            "AMD",
-            "INTC",
-            "GOOGL",
-            "GOOG",
-            "META",
-        ],
+    },
+}
+
+_SECTOR_CANONICAL_GROUPS: dict[str, dict[str, Any]] = {
+    "technology": {
+        "display_label": "Technology",
+        "aliases": {"technology", "tech", "\u79d1\u6280"},
+    },
+    "communicationservices": {
+        "display_label": "Communication Services",
+        "aliases": {
+            "communicationservices",
+            "communication services",
+            "internetcontent&information",
+            "\u901a\u4fe1\u670d\u52a1",
+            "\u901a\u8baf\u670d\u52a1",
+        },
     },
 }
 
 _SECTOR_ALIASES: dict[str, set[str]] = {
-    "technology": {"technology", "tech", "\u79d1\u6280"},
-    "communicationservices": {
-        "communicationservices",
-        "internetcontent&information",
-        "\u901a\u4fe1\u670d\u52a1",
-        "\u901a\u8baf\u670d\u52a1",
-    },
+    canonical_key: {
+        "".join(str(alias).strip().casefold().split())
+        for alias in {canonical_key, *config.get("aliases", set())}
+        if "".join(str(alias).strip().casefold().split())
+    }
+    for canonical_key, config in _SECTOR_CANONICAL_GROUPS.items()
+}
+
+_SECTOR_DISPLAY_LABELS: dict[str, str] = {
+    canonical_key: str(config.get("display_label") or canonical_key)
+    for canonical_key, config in _SECTOR_CANONICAL_GROUPS.items()
+}
+
+_SECTOR_ALIAS_TO_CANONICAL: dict[str, str] = {
+    alias: canonical_key
+    for canonical_key, aliases in _SECTOR_ALIASES.items()
+    for alias in aliases
 }
 
 
@@ -190,11 +173,12 @@ class SectorScannerService:
         market: str,
     ) -> list[str]:
         target_limit = max(1, limit)
-        normalized_target = self._normalize_sector_key(sector)
-        if not normalized_target:
+        target_metadata = type(self)._normalize_sector_metadata(sector)
+        canonical_target = target_metadata["canonical_key"]
+        if not canonical_target:
             return []
 
-        fallback_codes = self._get_overseas_fallback_codes(normalized_target, market)
+        fallback_codes = self._get_overseas_fallback_codes(canonical_target, market)
         if fallback_codes:
             return fallback_codes[:target_limit]
 
@@ -225,7 +209,7 @@ class SectorScannerService:
                     continue
 
                 if self._is_sector_match(
-                    normalized_target,
+                    canonical_target,
                     [info.get("sector"), info.get("industry")],
                 ):
                     matched_codes.append(code)
@@ -297,30 +281,30 @@ class SectorScannerService:
 
     @classmethod
     def _is_sector_match(cls, target: str, values: list[Any]) -> bool:
-        target_aliases = cls._resolve_sector_aliases(target)
+        if not cls._normalize_sector_metadata(target)["canonical_key"]:
+            return False
+
         for value in values:
-            normalized = cls._normalize_sector_key(value)
-            if not normalized:
-                continue
-            if normalized in target_aliases:
-                return True
-            if any(
-                alias in normalized or normalized in alias for alias in target_aliases
-            ):
+            if cls._match_sector_metadata(target, value)["matched"]:
                 return True
         return False
 
     @classmethod
     def _get_overseas_fallback_codes(cls, target: str, market: str) -> list[str]:
-        aliases = cls._resolve_sector_aliases(target)
+        target_metadata = cls._normalize_sector_metadata(target)
+        canonical_key = target_metadata["canonical_key"]
+        aliases = set(target_metadata["aliases"])
+        if not canonical_key:
+            return []
+
         fallback_map = _OVERSEAS_SECTOR_FALLBACK.get(market, {})
         matched: list[str] = []
-        for key, codes in fallback_map.items():
-            normalized_key = cls._normalize_sector_key(key)
-            if not normalized_key:
+        matched.extend(fallback_map.get(canonical_key, []))
+        for alias in aliases:
+            if alias == canonical_key:
                 continue
-            if normalized_key in aliases:
-                matched.extend(codes)
+            matched.extend(fallback_map.get(alias, []))
+
         deduplicated = list(dict.fromkeys(matched))
         return [
             code
@@ -330,15 +314,63 @@ class SectorScannerService:
 
     @classmethod
     def _resolve_sector_aliases(cls, value: str) -> set[str]:
-        normalized = cls._normalize_sector_key(value)
-        if not normalized:
+        metadata = cls._normalize_sector_metadata(value)
+        canonical_key = metadata["canonical_key"]
+        if not canonical_key:
             return set()
 
-        aliases = {normalized}
-        for alias_set in _SECTOR_ALIASES.values():
-            if normalized in alias_set:
-                aliases.update(alias_set)
+        aliases = set(_SECTOR_ALIASES.get(canonical_key, {canonical_key}))
+        aliases.add(canonical_key)
         return aliases
+
+    @classmethod
+    def _normalize_sector_metadata(cls, value: Any) -> dict[str, Any]:
+        raw_provider_label = str(value or "").strip()
+        normalized_key = cls._normalize_sector_key(value)
+        if not normalized_key:
+            return {
+                "canonical_key": "",
+                "display_label": "",
+                "aliases": [],
+                "raw_provider_label": raw_provider_label,
+            }
+
+        canonical_key = _SECTOR_ALIAS_TO_CANONICAL.get(normalized_key, normalized_key)
+        aliases = sorted(_SECTOR_ALIASES.get(canonical_key, {canonical_key}))
+        display_label = _SECTOR_DISPLAY_LABELS.get(
+            canonical_key,
+            raw_provider_label or canonical_key,
+        )
+        return {
+            "canonical_key": canonical_key,
+            "display_label": display_label,
+            "aliases": aliases,
+            "raw_provider_label": raw_provider_label,
+        }
+
+    @classmethod
+    def _match_sector_metadata(cls, target: str, provider_value: Any) -> dict[str, Any]:
+        target_metadata = cls._normalize_sector_metadata(target)
+        provider_metadata = cls._normalize_sector_metadata(provider_value)
+        target_aliases = set(target_metadata["aliases"])
+        provider_key = provider_metadata["canonical_key"]
+
+        matched = bool(provider_key) and (
+            provider_key in target_aliases
+            or any(
+                alias in provider_key or provider_key in alias
+                for alias in target_aliases
+            )
+        )
+
+        return {
+            "canonical_key": target_metadata["canonical_key"],
+            "display_label": target_metadata["display_label"],
+            "aliases": target_metadata["aliases"],
+            "raw_provider_label": provider_metadata["raw_provider_label"],
+            "provider_canonical_key": provider_key,
+            "matched": matched,
+        }
 
     @staticmethod
     def _normalize_sector_key(value: Any) -> str:

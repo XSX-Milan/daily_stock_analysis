@@ -140,3 +140,51 @@ class SectorCacheRecord(Base):
             name="uix_sector_cache_stock_sector_type",
         ),
     )
+
+
+class HotSectorSnapshotRecord(Base):
+    __tablename__ = "hot_sector_snapshot_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(10), nullable=False, index=True)
+    canonical_key = Column(String(100), nullable=False, index=True)
+    display_label = Column(String(100), nullable=False)
+    aliases_json = Column(Text, nullable=False, default="[]")
+    raw_name = Column(String(100), nullable=False)
+    source = Column(String(50), nullable=False)
+    change_pct = Column(Float)
+    stock_count = Column(Integer)
+    snapshot_at = Column(DateTime, nullable=False, index=True)
+    fetched_at = Column(DateTime, default=datetime.now, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.now, onupdate=datetime.now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "market",
+            "canonical_key",
+            name="uix_hot_sector_snapshot_market_canonical_key",
+        ),
+        Index(
+            "ix_hot_sector_snapshot_market_snapshot_at",
+            "market",
+            "snapshot_at",
+        ),
+    )
+
+    def get_aliases(self) -> list[str]:
+        try:
+            payload = json.loads(cast(str, self.aliases_json))
+        except Exception:
+            return []
+
+        if not isinstance(payload, list):
+            return []
+
+        aliases: list[str] = []
+        for item in payload:
+            value = str(item).strip()
+            if value and value not in aliases:
+                aliases.append(value)
+        return aliases

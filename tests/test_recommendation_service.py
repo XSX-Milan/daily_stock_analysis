@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pandas as pd
 
@@ -80,6 +80,8 @@ def build_fast_service(config: SimpleNamespace):
     service.recommendation_repo.get_list = Mock(return_value=[])
     service.recommendation_repo.get_count = Mock(return_value=0)
     service.recommendation_repo.get_priority_counts = Mock(return_value={})
+    service.recommendation_repo.get_hot_sector_snapshot = Mock(return_value=None)
+    service.recommendation_repo.upsert_hot_sector_snapshot = Mock(return_value=0)
     service.sector_cache_service.get_or_fetch_sector = Mock(return_value=None)
     service.sector_cache_service.save_sector_info = Mock()
     setattr(service, "_test_db_manager", db_manager)
@@ -221,6 +223,61 @@ class RecommendationServiceTestCase(unittest.TestCase):
         )
         refresh_stocks.assert_not_called()
 
+    def test_refresh_all_with_multi_sectors_deduplicates_union_before_scoring(
+        self,
+    ) -> None:
+        config = SimpleNamespace(max_workers=2)
+        service = build_fast_service(config)
+        service.sector_scanner_service.get_sector_stocks = Mock(
+            side_effect=[
+                ["AAPL", "MSFT", "GOOGL"],
+                ["GOOGL", "META", "NFLX"],
+            ]
+        )
+        service.watchlist_service.get_watchlist = Mock(return_value=[])
+
+        with patch.object(
+            service, "refresh_stocks", return_value=["ok"]
+        ) as refresh_stocks:
+            result = service.refresh_all(
+                market="US",
+                sectors=[
+                    "technology",
+                    "communication services",
+                    "tech",
+                    "Technology",
+                    "communication services",
+                ],
+            )
+
+        self.assertEqual(result, ["ok"])
+        service.sector_scanner_service.get_sector_stocks.assert_has_calls(
+            [
+                call(
+                    "technology",
+                    limit=service.sector_scanner_service.max_universe,
+                    market="US",
+                ),
+                call(
+                    "communication services",
+                    limit=service.sector_scanner_service.max_universe,
+                    market="US",
+                ),
+            ]
+        )
+        self.assertEqual(service.sector_scanner_service.get_sector_stocks.call_count, 2)
+        refresh_stocks.assert_called_once_with(
+            ["AAPL", "MSFT", "GOOGL", "META", "NFLX"],
+            sector_by_code={
+                "AAPL": "technology",
+                "MSFT": "technology",
+                "GOOGL": "technology",
+                "META": "communication services",
+                "NFLX": "communication services",
+            },
+            force=False,
+        )
+
     def test_resolve_auto_refresh_sectors_cn_uses_rankings_without_scan(self) -> None:
         config = SimpleNamespace(max_workers=2)
         service = build_fast_service(config)
@@ -244,7 +301,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
         from src.services.recommendation_service import _OVERSEAS_SECTOR_FALLBACK
 
         expected_sector_names = ["technology"]
-        self.assertGreater(
+        self.assertEqual(
             len(_OVERSEAS_SECTOR_FALLBACK["HK"]), len(expected_sector_names)
         )
         service.sector_scanner_service.get_sector_stocks = Mock(
@@ -278,7 +335,7 @@ class RecommendationServiceTestCase(unittest.TestCase):
         from src.services.recommendation_service import _OVERSEAS_SECTOR_FALLBACK
 
         expected_sector_names = ["technology", "communicationservices"]
-        self.assertGreater(
+        self.assertEqual(
             len(_OVERSEAS_SECTOR_FALLBACK["US"]), len(expected_sector_names)
         )
         service.sector_scanner_service.get_sector_stocks = Mock(
@@ -432,6 +489,197 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
         self.assertEqual(sectors, [])
         service.sector_scanner_service.scan_sectors.assert_not_called()
+
+    def test_get_hot_sectors_uses_fresh_snapshot_without_upstream_refresh(self) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        now = datetime.utcnow()
+        service.recommendation_repo.get_hot_sector_snapshot = Mock(
+            return_value={
+                "market": "US",
+                "snapshot_at": now,
+                "fetched_at": now,
+                "is_stale": False,
+                "items": [
+                    {
+                        "market": "US",
+                        "canonical_key": "technology",
+                        "display_label": "Technology",
+                        "aliases": ["technology", "tech"],
+                        "raw_name": "tech",
+                        "source": "snapshot",
+                        "change_pct": 1.8,
+                        "stock_count": 12,
+                        "snapshot_at": now,
+                        "fetched_at": now,
+                    }
+                ],
+            }
+        )
+        service._fetch_hot_sector_items_from_upstream = Mock(
+            side_effect=AssertionError("upstream refresh should not run")
+        )
+
+        sectors = service.get_hot_sectors("US")
+
+        self.assertEqual(len(sectors), 1)
+        self.assertEqual(sectors[0]["name"], "Technology")
+        self.assertEqual(sectors[0]["canonical_key"], "technology")
+        self.assertEqual(sectors[0]["display_label"], "Technology")
+        self.assertEqual(sectors[0]["raw_name"], "tech")
+        self.assertEqual(sectors[0]["source"], "snapshot")
+        self.assertIn("technology", sectors[0]["aliases"])
+        self.assertIn("tech", sectors[0]["aliases"])
+        self.assertEqual(sectors[0]["snapshot_at"], now)
+        self.assertEqual(sectors[0]["fetched_at"], now)
+        cast(
+            Mock, service.recommendation_repo.upsert_hot_sector_snapshot
+        ).assert_not_called()
+
+    def test_get_hot_sectors_refreshes_stale_snapshot_and_persists_canonical_items(
+        self,
+    ) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        stale_time = datetime.utcnow() - timedelta(hours=1)
+        service.recommendation_repo.get_hot_sector_snapshot = Mock(
+            return_value={
+                "market": "US",
+                "snapshot_at": stale_time,
+                "fetched_at": stale_time,
+                "is_stale": True,
+                "items": [
+                    {
+                        "market": "US",
+                        "canonical_key": "technology",
+                        "display_label": "Technology",
+                        "aliases": ["technology"],
+                        "raw_name": "technology",
+                        "source": "snapshot",
+                        "change_pct": 0.5,
+                        "stock_count": 8,
+                        "snapshot_at": stale_time,
+                        "fetched_at": stale_time,
+                    }
+                ],
+            }
+        )
+        service._fetch_hot_sector_items_from_upstream = Mock(
+            return_value=[
+                {
+                    "name": "tech",
+                    "raw_name": "tech",
+                    "change_pct": 2.5,
+                    "stock_count": 15,
+                    "source": "sector_scan",
+                },
+                {
+                    "name": "technology",
+                    "raw_name": "technology",
+                    "change_pct": 2.1,
+                    "stock_count": 13,
+                    "source": "sector_scan",
+                },
+            ]
+        )
+
+        sectors = service.get_hot_sectors("US")
+
+        self.assertEqual(len(sectors), 1)
+        self.assertEqual(sectors[0]["canonical_key"], "technology")
+        self.assertEqual(sectors[0]["name"], "Technology")
+        self.assertEqual(sectors[0]["display_label"], "Technology")
+        self.assertEqual(sectors[0]["raw_name"], "tech")
+        self.assertIn("technology", sectors[0]["aliases"])
+        self.assertIn("tech", sectors[0]["aliases"])
+        self.assertEqual(sectors[0]["stock_count"], 15)
+        cast(
+            Mock, service.recommendation_repo.upsert_hot_sector_snapshot
+        ).assert_called_once()
+        persisted_payload = cast(
+            Mock, service.recommendation_repo.upsert_hot_sector_snapshot
+        ).call_args.kwargs["sectors"]
+        self.assertEqual(len(persisted_payload), 1)
+        self.assertEqual(persisted_payload[0]["canonical_key"], "technology")
+        self.assertEqual(persisted_payload[0]["display_label"], "Technology")
+        self.assertEqual(persisted_payload[0]["raw_name"], "tech")
+        self.assertIn("technology", persisted_payload[0]["aliases"])
+        self.assertIn("tech", persisted_payload[0]["aliases"])
+
+    def test_get_hot_sectors_returns_stale_snapshot_when_refresh_fails(self) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        stale_time = datetime.utcnow() - timedelta(hours=1)
+        service.recommendation_repo.get_hot_sector_snapshot = Mock(
+            return_value={
+                "market": "US",
+                "snapshot_at": stale_time,
+                "fetched_at": stale_time,
+                "is_stale": True,
+                "items": [
+                    {
+                        "market": "US",
+                        "canonical_key": "technology",
+                        "display_label": "Technology",
+                        "aliases": ["technology"],
+                        "raw_name": "technology",
+                        "source": "snapshot",
+                        "change_pct": 0.8,
+                        "stock_count": 9,
+                        "snapshot_at": stale_time,
+                        "fetched_at": stale_time,
+                    }
+                ],
+            }
+        )
+        service._fetch_hot_sector_items_from_upstream = Mock(
+            side_effect=RuntimeError("upstream unavailable")
+        )
+
+        sectors = service.get_hot_sectors("US")
+
+        self.assertEqual(len(sectors), 1)
+        self.assertEqual(sectors[0]["canonical_key"], "technology")
+        self.assertEqual(sectors[0]["name"], "Technology")
+        self.assertEqual(sectors[0]["display_label"], "Technology")
+        self.assertEqual(sectors[0]["source"], "snapshot")
+        self.assertEqual(sectors[0]["snapshot_at"], stale_time)
+        self.assertEqual(sectors[0]["fetched_at"], stale_time)
+        self.assertEqual(sectors[0]["stock_count"], 9)
+        cast(
+            Mock, service.recommendation_repo.upsert_hot_sector_snapshot
+        ).assert_not_called()
+
+    def test_get_hot_sectors_refreshes_when_snapshot_missing(self) -> None:
+        service = build_fast_service(SimpleNamespace(max_workers=2))
+        service.recommendation_repo.get_hot_sector_snapshot = Mock(return_value=None)
+        service._fetch_hot_sector_items_from_upstream = Mock(
+            return_value=[
+                {
+                    "name": "communication services",
+                    "raw_name": "communication services",
+                    "change_pct": 1.2,
+                    "stock_count": 6,
+                    "source": "sector_rankings",
+                }
+            ]
+        )
+
+        sectors = service.get_hot_sectors("US")
+
+        self.assertEqual(len(sectors), 1)
+        self.assertEqual(sectors[0]["canonical_key"], "communicationservices")
+        self.assertEqual(sectors[0]["name"], "Communication Services")
+        self.assertEqual(sectors[0]["display_label"], "Communication Services")
+        self.assertEqual(sectors[0]["raw_name"], "communication services")
+        self.assertEqual(sectors[0]["source"], "sector_rankings")
+        self.assertIn("communicationservices", sectors[0]["aliases"])
+        self.assertIsNotNone(sectors[0]["snapshot_at"])
+        cast(
+            Mock, service.recommendation_repo.upsert_hot_sector_snapshot
+        ).assert_called_once()
+        self.assertIsNotNone(
+            cast(
+                Mock, service.recommendation_repo.upsert_hot_sector_snapshot
+            ).call_args.kwargs["fetched_at"]
+        )
 
     def test_refresh_stocks_reuses_recent_records_when_not_forced(self) -> None:
         config = SimpleNamespace(max_workers=2, recommend_refresh_skip_seconds=300)
@@ -852,15 +1100,91 @@ class RecommendationServiceTestCase(unittest.TestCase):
         self.assertEqual([item.code for item in result], ["AAPL"])
         service._build_stock_payload.assert_called_once()
 
-    def test_refresh_stocks_requires_scope_pair_when_partially_provided(self) -> None:
+    def test_refresh_stocks_filters_sector_using_canonical_alias_matching(self) -> None:
+        config = SimpleNamespace(max_workers=2)
+        service = build_fast_service(config)
+        service.recommendation_repo.get_latest = Mock(
+            side_effect=[
+                SimpleNamespace(sector="Tech"),
+                SimpleNamespace(sector="Financial Services"),
+            ]
+        )
+        service.recommendation_repo.save_batch = Mock()
+        service._build_stock_payload = Mock(
+            return_value={
+                "code": "AAPL",
+                "name": "Apple",
+                "region": MarketRegion.US,
+                "sector": "Technology",
+                "current_price": 200.0,
+                "ideal_buy_price": 195.0,
+                "stop_loss": 180.0,
+                "take_profit": 225.0,
+                "scoring_data": Mock(),
+            }
+        )
+        service.scoring_engine.score_batch = Mock(
+            return_value=[
+                build_composite_score(
+                    code="AAPL",
+                    total_score=88.0,
+                    priority=RecommendationPriority.BUY_NOW,
+                )
+            ]
+        )
+
+        result = service.refresh_stocks(
+            ["AAPL", "MSFT"],
+            force=True,
+            market="US",
+            sector="technology",
+        )
+
+        self.assertEqual([item.code for item in result], ["AAPL"])
+        service._build_stock_payload.assert_called_once_with("AAPL", ANY)
+
+    def test_refresh_stocks_requires_market_when_sector_provided(self) -> None:
         config = SimpleNamespace(max_workers=2)
         service = build_fast_service(config)
 
         with self.assertRaises(ValueError):
-            service.refresh_stocks(["AAPL"], market="US", sector=None)
-
-        with self.assertRaises(ValueError):
             service.refresh_stocks(["AAPL"], market=None, sector="Technology")
+
+    def test_refresh_stocks_market_scope_without_sector_is_allowed(self) -> None:
+        config = SimpleNamespace(max_workers=2)
+        service = build_fast_service(config)
+        service._build_stock_payload = Mock(
+            return_value={
+                "code": "AAPL",
+                "name": "Apple",
+                "region": MarketRegion.US,
+                "sector": "Technology",
+                "current_price": 200.0,
+                "ideal_buy_price": 195.0,
+                "stop_loss": 180.0,
+                "take_profit": 225.0,
+                "scoring_data": Mock(),
+            }
+        )
+        service.scoring_engine.score_batch = Mock(
+            return_value=[
+                build_composite_score(
+                    code="AAPL",
+                    total_score=88.0,
+                    priority=RecommendationPriority.BUY_NOW,
+                )
+            ]
+        )
+
+        result = service.refresh_stocks(
+            ["AAPL", "600519"],
+            force=True,
+            market="US",
+            sector=None,
+        )
+
+        self.assertEqual([item.code for item in result], ["AAPL"])
+        service._build_stock_payload.assert_called_once_with("AAPL", ANY)
 
     def test_refresh_stocks_auto_universe_enables_score_first_top_n(self) -> None:
         config = SimpleNamespace(
@@ -1605,18 +1929,23 @@ class RecommendationServiceTestCase(unittest.TestCase):
 
         self.assertEqual(items, ["item"])
         self.assertEqual(total, 7)
-        service.recommendation_repo.get_list.assert_called_once_with(
-            priority="BUY_NOW",
-            sector="Technology",
-            region="US",
-            limit=10,
-            offset=5,
-        )
-        service.recommendation_repo.get_count.assert_called_once_with(
-            priority="BUY_NOW",
-            sector="Technology",
-            region="US",
-        )
+        service.recommendation_repo.get_list.assert_called_once()
+        list_kwargs = service.recommendation_repo.get_list.call_args.kwargs
+        self.assertEqual(list_kwargs["priority"], "BUY_NOW")
+        self.assertIsNone(list_kwargs["sector"])
+        self.assertEqual(list_kwargs["region"], "US")
+        self.assertEqual(list_kwargs["limit"], 10)
+        self.assertEqual(list_kwargs["offset"], 5)
+        self.assertIn("Technology", list_kwargs["sectors"])
+        self.assertIn("technology", list_kwargs["sectors"])
+
+        service.recommendation_repo.get_count.assert_called_once()
+        count_kwargs = service.recommendation_repo.get_count.call_args.kwargs
+        self.assertEqual(count_kwargs["priority"], "BUY_NOW")
+        self.assertIsNone(count_kwargs["sector"])
+        self.assertEqual(count_kwargs["region"], "US")
+        self.assertIn("Technology", count_kwargs["sectors"])
+        self.assertIn("technology", count_kwargs["sectors"])
 
     def test_get_priority_summary_from_repository(self) -> None:
         service = build_fast_service(SimpleNamespace(max_workers=2))

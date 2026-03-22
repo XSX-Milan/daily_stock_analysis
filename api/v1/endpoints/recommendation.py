@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Iterable
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
@@ -29,6 +29,7 @@ from src.recommendation.models import (
     RecommendationPriority,
     StockRecommendation,
 )
+from src.repositories.recommendation_repo import RecommendationRepository
 from src.services.recommendation_service import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,98 @@ def _region_to_code(value: object) -> str:
     return str(resolved or "")
 
 
-def _normalize_refresh_scope(request: RefreshRequest) -> tuple[str, str | None]:
-    market = str(request.market or "").strip()
+def _service_normalize_sector_inputs(
+    service: RecommendationService,
+    *,
+    sector: str | None = None,
+    sectors: Iterable[str] | None = None,
+) -> list[str]:
+    normalizer = getattr(service, "_normalize_sector_inputs", None)
+    if callable(normalizer):
+        try:
+            normalized = normalizer(sector=sector, sectors=sectors)
+        except TypeError:
+            try:
+                normalized = normalizer(sector, sectors)
+            except Exception:
+                normalized = None
+        except Exception:
+            normalized = None
+
+        if isinstance(normalized, list):
+            return RecommendationRepository.normalize_sector_inputs(sectors=normalized)
+
+    fallback_normalizer = getattr(service, "_repo_normalize_sector_inputs", None)
+    if callable(fallback_normalizer):
+        try:
+            normalized = fallback_normalizer(sector=sector, sectors=sectors)
+        except TypeError:
+            try:
+                normalized = fallback_normalizer(sector, sectors)
+            except Exception:
+                normalized = None
+        except Exception:
+            normalized = None
+
+        if isinstance(normalized, list):
+            return RecommendationRepository.normalize_sector_inputs(sectors=normalized)
+
+    return RecommendationRepository.normalize_sector_inputs(
+        sector=sector,
+        sectors=sectors,
+    )
+
+
+def _service_normalize_sector_metadata(
+    service: RecommendationService,
+    value: object,
+) -> dict[str, Any]:
+    metadata_normalizer = getattr(service, "_normalize_sector_metadata", None)
+    if callable(metadata_normalizer):
+        try:
+            metadata = metadata_normalizer(value)
+        except Exception:
+            metadata = None
+        if isinstance(metadata, dict):
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            display_label = str(metadata.get("display_label") or value or "").strip()
+            alias_candidates: list[str] = []
+            for raw_value in [
+                *(metadata.get("aliases") or []),
+                value,
+                display_label,
+                canonical_key,
+            ]:
+                alias_value = str(raw_value or "").strip()
+                if alias_value:
+                    alias_candidates.append(alias_value)
+            aliases = RecommendationRepository.normalize_sector_inputs(
+                sectors=alias_candidates
+            )
+            return {
+                "canonical_key": canonical_key,
+                "display_label": display_label,
+                "aliases": aliases,
+            }
+
+    raw_value = str(value or "").strip()
+    canonical_key = "".join(raw_value.casefold().split())
+    display_label = raw_value or canonical_key
+    aliases = RecommendationRepository.normalize_sector_inputs(
+        sectors=[raw_value, display_label, canonical_key]
+    )
+    return {
+        "canonical_key": canonical_key,
+        "display_label": display_label,
+        "aliases": aliases,
+    }
+
+
+def _normalize_refresh_scope(
+    request: RefreshRequest,
+    service: RecommendationService,
+) -> tuple[str, list[str]]:
+    market = str(request.market).strip()
     if not market:
         raise HTTPException(
             status_code=400,
@@ -57,11 +148,12 @@ def _normalize_refresh_scope(request: RefreshRequest) -> tuple[str, str | None]:
             },
         )
 
-    if request.sector is None:
-        return market, None
-
-    sector = str(request.sector or "").strip()
-    if not sector:
+    normalized_sectors = _service_normalize_sector_inputs(
+        service,
+        sector=request.sector,
+        sectors=request.sectors,
+    )
+    if request.has_sector_scope() and not normalized_sectors:
         raise HTTPException(
             status_code=400,
             detail={
@@ -69,11 +161,28 @@ def _normalize_refresh_scope(request: RefreshRequest) -> tuple[str, str | None]:
                 "message": "sector is required when market is provided",
             },
         )
-    return market, sector
+    return market, normalized_sectors
 
 
 def _normalize_market_code(market: str | None) -> str:
     return str(market or "CN").strip().upper() or "CN"
+
+
+def _merge_recommendation_items_by_code(
+    batches: Iterable[Iterable[StockRecommendation]],
+) -> list[StockRecommendation]:
+    merged_by_code: dict[str, StockRecommendation] = {}
+    ordered_codes: list[str] = []
+
+    for batch in batches:
+        for item in batch:
+            code = str(getattr(item, "code", "") or "").strip()
+            if not code or code in merged_by_code:
+                continue
+            merged_by_code[code] = item
+            ordered_codes.append(code)
+
+    return [merged_by_code[code] for code in ordered_codes]
 
 
 def _to_recommendation_response(
@@ -131,6 +240,29 @@ def _to_recommendation_response(
     suggested_buy = getattr(item, "ideal_buy_price", None)
     stop_loss = getattr(item, "stop_loss", None)
     take_profit = getattr(item, "take_profit", None)
+    normalized_sectors = _service_normalize_sector_inputs(
+        service,
+        sector=getattr(item, "sector", None),
+        sectors=getattr(item, "sectors", None),
+    )
+    legacy_sector = str(getattr(item, "sector", "") or "").strip() or None
+    if legacy_sector is None and normalized_sectors:
+        legacy_sector = normalized_sectors[0]
+    sector_metadata = _service_normalize_sector_metadata(service, legacy_sector)
+    alias_candidates: list[str] = []
+    for raw_value in [
+        *(sector_metadata.get("aliases") or []),
+        *normalized_sectors,
+        legacy_sector,
+        sector_metadata.get("display_label"),
+        sector_metadata.get("canonical_key"),
+    ]:
+        alias_value = str(raw_value or "").strip()
+        if alias_value:
+            alias_candidates.append(alias_value)
+    normalized_aliases = RecommendationRepository.normalize_sector_inputs(
+        sectors=alias_candidates,
+    )
 
     return RecommendationResponse(
         stock_code=item.code,
@@ -139,7 +271,11 @@ def _to_recommendation_response(
         stock_name=item.name,
         market=str(region_code),
         region=str(region_code),
-        sector=item.sector,
+        sector=legacy_sector,
+        sectors=normalized_sectors,
+        canonical_key=str(sector_metadata.get("canonical_key") or "").strip() or None,
+        display_label=str(sector_metadata.get("display_label") or "").strip() or None,
+        aliases=normalized_aliases,
         scores=scores,
         composite_score=total_score,
         priority=priority,
@@ -177,17 +313,40 @@ def refresh_recommendations(
 ) -> RecommendationListResponse:
     """Refresh recommendations for the requested stock set."""
     try:
-        market, sector = _normalize_refresh_scope(request)
+        market, normalized_sectors = _normalize_refresh_scope(request, service)
+        legacy_sector = normalized_sectors[0] if normalized_sectors else None
+
         if request.stock_codes:
-            items = service.refresh_stocks(
-                request.stock_codes,
-                force=request.force,
-                market=market,
-                sector=sector,
-            )
+            if not normalized_sectors:
+                items = service.refresh_stocks(
+                    request.stock_codes,
+                    force=request.force,
+                    market=market,
+                )
+            elif len(normalized_sectors) == 1:
+                items = service.refresh_stocks(
+                    request.stock_codes,
+                    force=request.force,
+                    market=market,
+                    sector=legacy_sector,
+                )
+            else:
+                scoped_items = [
+                    service.refresh_stocks(
+                        request.stock_codes,
+                        force=request.force,
+                        market=market,
+                        sector=target_sector,
+                    )
+                    for target_sector in normalized_sectors
+                ]
+                items = _merge_recommendation_items_by_code(scoped_items)
         else:
             items = service.refresh_all(
-                force=request.force, market=market, sector=sector
+                force=request.force,
+                market=market,
+                sector=legacy_sector,
+                sectors=normalized_sectors or None,
             )
         return RecommendationListResponse(
             items=[_to_recommendation_response(item, service) for item in items],
@@ -196,7 +355,8 @@ def refresh_recommendations(
                 "stock_codes": request.stock_codes,
                 "force": request.force,
                 "market": market,
-                "sector": sector,
+                "sector": legacy_sector,
+                "sectors": normalized_sectors,
             },
         )
     except HTTPException:
@@ -269,6 +429,10 @@ def refresh_single_recommendation(
 def get_recommendation_list(
     priority: str | None = Query(None, description="Priority filter"),
     sector: str | None = Query(None, description="Sector filter"),
+    sectors: list[str] | None = Query(
+        None,
+        description="Canonical sector filters (repeat query key for OR semantics)",
+    ),
     market: str | None = Query(None, description="Market filter"),
     service: RecommendationService = Depends(get_recommendation_service),
 ) -> RecommendationListResponse:
@@ -277,6 +441,7 @@ def get_recommendation_list(
         result = service.get_recommendations(
             priority=priority,
             sector=sector,
+            sectors=sectors,
             region=market,
         )
 
@@ -286,10 +451,24 @@ def get_recommendation_list(
             items = list(result) if result is not None else []
             total = len(items)
 
+        normalized_sectors = _service_normalize_sector_inputs(
+            service,
+            sector=sector,
+            sectors=sectors,
+        )
+        legacy_sector = sector
+        if legacy_sector is None and normalized_sectors:
+            legacy_sector = normalized_sectors[0]
+
         return RecommendationListResponse(
             items=[_to_recommendation_response(item, service) for item in items],
             total=total,
-            filters={"priority": priority, "sector": sector, "market": market},
+            filters={
+                "priority": priority,
+                "sector": legacy_sector,
+                "sectors": normalized_sectors,
+                "market": market,
+            },
         )
     except Exception as exc:
         logger.error("Failed to query recommendations: %s", exc, exc_info=True)
@@ -537,9 +716,18 @@ def get_hot_sectors(
     return HotSectorListResponse(
         sectors=[
             HotSectorItemResponse(
-                name=str(item.get("name") or ""),
+                name=str(item.get("name") or item.get("display_label") or ""),
+                canonical_key=str(item.get("canonical_key") or "").strip() or None,
+                display_label=str(item.get("display_label") or "").strip() or None,
+                aliases=RecommendationRepository.normalize_sector_inputs(
+                    sectors=item.get("aliases") or []
+                ),
+                raw_name=str(item.get("raw_name") or "").strip() or None,
+                source=str(item.get("source") or "").strip() or None,
                 change_pct=item.get("change_pct"),
                 stock_count=item.get("stock_count"),
+                snapshot_at=item.get("snapshot_at"),
+                fetched_at=item.get("fetched_at"),
             )
             for item in sectors
         ]

@@ -160,6 +160,74 @@ class SectorScannerServiceTestCase(unittest.TestCase):
         self.assertEqual(codes, ["AAPL"])
         mock_yf.Ticker.assert_any_call("AAPL")
 
+    def test_alias_metadata_collapses_to_canonical_key_and_display_label(self):
+        tech_meta = SectorScannerService._normalize_sector_metadata("Tech")
+        zh_tech_meta = SectorScannerService._normalize_sector_metadata("科技")
+
+        self.assertEqual(tech_meta["canonical_key"], "technology")
+        self.assertEqual(zh_tech_meta["canonical_key"], "technology")
+        self.assertEqual(tech_meta["display_label"], "Technology")
+        self.assertEqual(zh_tech_meta["display_label"], "Technology")
+        self.assertIn("tech", tech_meta["aliases"])
+        self.assertIn("technology", zh_tech_meta["aliases"])
+        self.assertEqual(tech_meta["raw_provider_label"], "Tech")
+        self.assertEqual(zh_tech_meta["raw_provider_label"], "科技")
+
+    def test_communication_services_aliases_collapse_to_same_canonical_metadata(self):
+        spaced_alias_meta = SectorScannerService._normalize_sector_metadata(
+            "Communication Services"
+        )
+        provider_alias_meta = SectorScannerService._normalize_sector_metadata(
+            "Internet Content & Information"
+        )
+        zh_alias_meta = SectorScannerService._normalize_sector_metadata("通信服务")
+
+        self.assertEqual(spaced_alias_meta["canonical_key"], "communicationservices")
+        self.assertEqual(provider_alias_meta["canonical_key"], "communicationservices")
+        self.assertEqual(zh_alias_meta["canonical_key"], "communicationservices")
+        self.assertEqual(spaced_alias_meta["display_label"], "Communication Services")
+        self.assertEqual(provider_alias_meta["display_label"], "Communication Services")
+        self.assertEqual(zh_alias_meta["display_label"], "Communication Services")
+        self.assertIn("communicationservices", spaced_alias_meta["aliases"])
+        self.assertIn("internetcontent&information", provider_alias_meta["aliases"])
+        self.assertGreaterEqual(len(zh_alias_meta["aliases"]), 2)
+        self.assertEqual(
+            provider_alias_meta["raw_provider_label"], "Internet Content & Information"
+        )
+
+    def test_fallback_alias_lookup_uses_canonical_group(self):
+        codes_from_en_alias = SectorScannerService._get_overseas_fallback_codes(
+            "Tech", "US"
+        )
+        codes_from_zh_alias = SectorScannerService._get_overseas_fallback_codes(
+            "科技", "US"
+        )
+
+        self.assertEqual(codes_from_en_alias, codes_from_zh_alias)
+        self.assertGreater(len(codes_from_en_alias), 0)
+
+    def test_provider_unmatched_metadata_keeps_raw_label(self):
+        matched = SectorScannerService._match_sector_metadata("Technology", "Utilities")
+
+        self.assertFalse(matched["matched"])
+        self.assertEqual(matched["canonical_key"], "technology")
+        self.assertEqual(matched["display_label"], "Technology")
+        self.assertIn("tech", matched["aliases"])
+        self.assertEqual(matched["raw_provider_label"], "Utilities")
+
+    def test_unknown_sector_fallback_and_match_fail_safe(self):
+        unknown_codes = SectorScannerService._get_overseas_fallback_codes(
+            "Unknown Sector",
+            "US",
+        )
+        is_match = SectorScannerService._is_sector_match(
+            "Unknown Sector",
+            ["Tech", "Semiconductors"],
+        )
+
+        self.assertEqual(unknown_codes, [])
+        self.assertFalse(is_match)
+
 
 if __name__ == "__main__":
     unittest.main()

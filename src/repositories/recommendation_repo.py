@@ -9,7 +9,11 @@ from typing import Any, Iterable, cast
 
 from sqlalchemy import delete, desc, func, select, update
 
-from src.recommendation.db_models import RecommendationRecord, SectorCacheRecord
+from src.recommendation.db_models import (
+    HotSectorSnapshotRecord,
+    RecommendationRecord,
+    SectorCacheRecord,
+)
 from src.recommendation.models import (
     CompositeScore,
     DimensionScore,
@@ -202,12 +206,18 @@ class RecommendationRepository:
         self,
         priority: str | RecommendationPriority | None = None,
         sector: str | None = None,
+        sectors: list[str] | None = None,
         region: str | MarketRegion | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> list[StockRecommendation]:
         """Return recommendations filtered by priority, sector, and region."""
-        filters = self._build_filters(priority=priority, sector=sector, region=region)
+        filters = self._build_filters(
+            priority=priority,
+            sector=sector,
+            sectors=sectors,
+            region=region,
+        )
 
         with self.db.session_scope() as session:
             query = (
@@ -231,7 +241,12 @@ class RecommendationRepository:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Return recommendation history rows for API list responses."""
-        filters = self._build_filters(priority=None, sector=None, region=market)
+        filters = self._build_filters(
+            priority=None,
+            sector=None,
+            sectors=None,
+            region=market,
+        )
 
         with self.db.session_scope() as session:
             records = (
@@ -292,10 +307,16 @@ class RecommendationRepository:
         self,
         priority: str | RecommendationPriority | None = None,
         sector: str | None = None,
+        sectors: list[str] | None = None,
         region: str | MarketRegion | None = None,
     ) -> int:
         """Return the count for recommendation records matching filters."""
-        filters = self._build_filters(priority=priority, sector=sector, region=region)
+        filters = self._build_filters(
+            priority=priority,
+            sector=sector,
+            sectors=sectors,
+            region=region,
+        )
 
         with self.db.session_scope() as session:
             count = session.execute(
@@ -471,10 +492,267 @@ class RecommendationRepository:
                         .values(fetched_at=fetched_time, updated_at=fetched_time)
                     )
 
+    def upsert_hot_sector_snapshot(
+        self,
+        market: str,
+        sectors: Iterable[dict[str, Any]],
+        *,
+        snapshot_at: datetime | None = None,
+        fetched_at: datetime | None = None,
+    ) -> int:
+        normalized_market = str(market or "").strip().upper()
+        if not normalized_market:
+            return 0
+
+        default_snapshot_at = snapshot_at or datetime.utcnow()
+        fetched_time = fetched_at or datetime.utcnow()
+
+        normalized_payload: dict[str, dict[str, Any]] = {}
+        for item in sectors:
+            canonical_key = str(item.get("canonical_key", "")).strip()
+            if not canonical_key:
+                continue
+
+            raw_aliases = item.get("aliases")
+            alias_candidates: list[str]
+            if isinstance(raw_aliases, (list, tuple, set)):
+                alias_candidates = [str(alias) for alias in raw_aliases]
+            elif raw_aliases is None:
+                alias_candidates = []
+            else:
+                alias_candidates = [str(raw_aliases)]
+
+            item_snapshot_at = (
+                cast(datetime, item["snapshot_at"])
+                if isinstance(item.get("snapshot_at"), datetime)
+                else default_snapshot_at
+            )
+
+            existing = normalized_payload.get(canonical_key)
+            if existing is None:
+                normalized_payload[canonical_key] = {
+                    "canonical_key": canonical_key,
+                    "display_label": str(item.get("display_label", "")).strip()
+                    or canonical_key,
+                    "aliases": self.normalize_sector_inputs(sectors=alias_candidates),
+                    "raw_name": str(item.get("raw_name", "")).strip()
+                    or str(item.get("display_label", "")).strip()
+                    or canonical_key,
+                    "source": str(item.get("source", "")).strip(),
+                    "change_pct": item.get("change_pct"),
+                    "stock_count": item.get("stock_count"),
+                    "snapshot_at": item_snapshot_at,
+                }
+                continue
+
+            merged_aliases = self.normalize_sector_inputs(
+                sectors=[*cast(list[str], existing["aliases"]), *alias_candidates]
+            )
+            existing["aliases"] = merged_aliases
+            existing["display_label"] = str(
+                item.get("display_label", "")
+            ).strip() or str(existing["display_label"])
+            existing["raw_name"] = str(item.get("raw_name", "")).strip() or str(
+                existing["raw_name"]
+            )
+            existing["source"] = str(item.get("source", "")).strip() or str(
+                existing["source"]
+            )
+            if item.get("change_pct") is not None:
+                existing["change_pct"] = item.get("change_pct")
+            if item.get("stock_count") is not None:
+                existing["stock_count"] = item.get("stock_count")
+            if item_snapshot_at > cast(datetime, existing["snapshot_at"]):
+                existing["snapshot_at"] = item_snapshot_at
+
+        if not normalized_payload:
+            return 0
+
+        with self.db.session_scope() as session:
+            for canonical_key in sorted(normalized_payload.keys()):
+                item = normalized_payload[canonical_key]
+                payload = self.build_hot_sector_snapshot_payload(
+                    market=normalized_market,
+                    canonical_key=str(item["canonical_key"]),
+                    display_label=str(item["display_label"]),
+                    aliases=cast(list[str], item["aliases"]),
+                    raw_name=str(item["raw_name"]),
+                    source=str(item["source"]),
+                    snapshot_at=cast(datetime, item["snapshot_at"]),
+                    change_pct=cast(float | None, item["change_pct"]),
+                    stock_count=cast(int | None, item["stock_count"]),
+                )
+                existing = session.execute(
+                    select(HotSectorSnapshotRecord).where(
+                        HotSectorSnapshotRecord.market == normalized_market,
+                        HotSectorSnapshotRecord.canonical_key == canonical_key,
+                    )
+                ).scalar_one_or_none()
+
+                if existing is None:
+                    session.add(
+                        HotSectorSnapshotRecord(
+                            **payload,
+                            fetched_at=fetched_time,
+                            updated_at=fetched_time,
+                        )
+                    )
+                else:
+                    session.execute(
+                        update(HotSectorSnapshotRecord)
+                        .where(HotSectorSnapshotRecord.id == existing.id)
+                        .values(
+                            **payload,
+                            fetched_at=fetched_time,
+                            updated_at=fetched_time,
+                        )
+                    )
+
+        return len(normalized_payload)
+
+    def get_hot_sector_snapshot(
+        self,
+        market: str,
+        *,
+        ttl_minutes: int = 30,
+        include_stale: bool = True,
+    ) -> dict[str, Any] | None:
+        normalized_market = str(market or "").strip().upper()
+        if not normalized_market:
+            return None
+
+        ttl_window = max(1, int(ttl_minutes))
+        cutoff = datetime.utcnow() - timedelta(minutes=ttl_window)
+
+        with self.db.session_scope() as session:
+            latest_snapshot_at = cast(
+                datetime | None,
+                session.execute(
+                    select(func.max(HotSectorSnapshotRecord.snapshot_at)).where(
+                        HotSectorSnapshotRecord.market == normalized_market
+                    )
+                ).scalar_one_or_none(),
+            )
+            if latest_snapshot_at is None:
+                return None
+
+            is_stale = latest_snapshot_at < cutoff
+            if is_stale and not include_stale:
+                return None
+
+            rows = (
+                session.execute(
+                    select(HotSectorSnapshotRecord)
+                    .where(
+                        HotSectorSnapshotRecord.market == normalized_market,
+                        HotSectorSnapshotRecord.snapshot_at == latest_snapshot_at,
+                    )
+                    .order_by(
+                        desc(
+                            func.coalesce(HotSectorSnapshotRecord.change_pct, -(10**9))
+                        ),
+                        desc(func.coalesce(HotSectorSnapshotRecord.stock_count, -1)),
+                        HotSectorSnapshotRecord.canonical_key,
+                        HotSectorSnapshotRecord.id,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                return None
+
+            latest_fetched_at = max(
+                (
+                    fetched_at
+                    for fetched_at in (
+                        cast(datetime | None, row.fetched_at) for row in rows
+                    )
+                    if fetched_at is not None
+                ),
+                default=None,
+            )
+            items = [self._hot_sector_snapshot_to_dict(row) for row in rows]
+
+            return {
+                "market": normalized_market,
+                "snapshot_at": latest_snapshot_at,
+                "fetched_at": latest_fetched_at,
+                "is_stale": is_stale,
+                "items": items,
+            }
+
+    @staticmethod
+    def normalize_sector_inputs(
+        sector: str | None = None,
+        sectors: Iterable[str] | None = None,
+    ) -> list[str]:
+        normalized: list[str] = []
+
+        for raw_value in sectors or []:
+            value = str(raw_value).strip()
+            if value and value not in normalized:
+                normalized.append(value)
+
+        if not normalized and sector is not None:
+            legacy_sector = str(sector).strip()
+            if legacy_sector:
+                normalized.append(legacy_sector)
+
+        return normalized
+
+    @staticmethod
+    def build_hot_sector_snapshot_payload(
+        *,
+        market: str,
+        canonical_key: str,
+        display_label: str,
+        aliases: Iterable[str],
+        raw_name: str,
+        source: str,
+        snapshot_at: datetime,
+        change_pct: float | None = None,
+        stock_count: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_market = str(market or "").strip().upper()
+        normalized_aliases = RecommendationRepository.normalize_sector_inputs(
+            sectors=aliases
+        )
+        return {
+            "market": normalized_market,
+            "canonical_key": str(canonical_key or "").strip(),
+            "display_label": str(display_label or "").strip(),
+            "aliases_json": json.dumps(normalized_aliases, ensure_ascii=False),
+            "raw_name": str(raw_name or "").strip(),
+            "source": str(source or "").strip(),
+            "snapshot_at": snapshot_at,
+            "change_pct": change_pct,
+            "stock_count": stock_count,
+        }
+
+    @staticmethod
+    def _hot_sector_snapshot_to_dict(
+        row: HotSectorSnapshotRecord,
+    ) -> dict[str, Any]:
+        return {
+            "market": str(cast(str, row.market)),
+            "canonical_key": str(cast(str, row.canonical_key)),
+            "display_label": str(cast(str, row.display_label)),
+            "aliases": row.get_aliases(),
+            "raw_name": str(cast(str, row.raw_name)),
+            "source": str(cast(str, row.source)),
+            "change_pct": cast(float | None, row.change_pct),
+            "stock_count": cast(int | None, row.stock_count),
+            "snapshot_at": cast(datetime | None, row.snapshot_at),
+            "fetched_at": cast(datetime | None, row.fetched_at),
+            "updated_at": cast(datetime | None, row.updated_at),
+        }
+
     @staticmethod
     def _build_filters(
         priority: str | RecommendationPriority | None,
         sector: str | None,
+        sectors: Iterable[str] | None,
         region: str | MarketRegion | None,
     ) -> list[Any]:
         filters: list[Any] = []
@@ -485,8 +763,15 @@ class RecommendationRepository:
                 == RecommendationRepository._normalize_priority_label(priority)
             )
 
-        if sector is not None:
-            filters.append(RecommendationRecord.sector == sector)
+        normalized_sectors = RecommendationRepository.normalize_sector_inputs(
+            sector=sector,
+            sectors=sectors,
+        )
+        if normalized_sectors:
+            if len(normalized_sectors) == 1:
+                filters.append(RecommendationRecord.sector == normalized_sectors[0])
+            else:
+                filters.append(RecommendationRecord.sector.in_(normalized_sectors))
 
         if region is not None:
             region_value = (

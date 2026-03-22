@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient  # pyright: ignore[reportMissingImports]
@@ -25,12 +26,17 @@ from src.recommendation.models import (
 from src.services.sector_scanner_service import _OVERSEAS_SECTOR_FALLBACK
 
 
-def _build_recommendation(code: str, score: float) -> StockRecommendation:
+def _build_recommendation(
+    code: str,
+    score: float,
+    *,
+    sector: str = "Technology",
+) -> StockRecommendation:
     return StockRecommendation(
         code=code,
         name=f"Name-{code}",
         region=MarketRegion.US if code == "AAPL" else MarketRegion.CN,
-        sector="Tech",
+        sector=sector,
         current_price=100.0,
         composite_score=CompositeScore(
             total_score=score,
@@ -236,6 +242,30 @@ class FakeRecommendationRepo:
 
 
 class FakeRecommendationService:
+    _SECTOR_ALIAS_GROUPS: dict[str, set[str]] = {
+        "technology": {
+            "technology",
+            "tech",
+            "informationtechnology",
+            "科技",
+            "信息技术",
+        },
+        "consumer": {
+            "consumer",
+            "consumerstaples",
+            "消费",
+            "可选消费",
+        },
+        "semiconductor": {"semiconductor", "半导体"},
+        "artificialintelligence": {"artificialintelligence", "ai", "人工智能"},
+    }
+    _SECTOR_DISPLAY_LABELS: dict[str, str] = {
+        "technology": "Technology",
+        "consumer": "Consumer",
+        "semiconductor": "半导体",
+        "artificialintelligence": "人工智能",
+    }
+
     def __init__(self) -> None:
         self._watchlist_service = FakeWatchlistService()
         self._sector_scanner_service = FakeSectorScannerService()
@@ -245,8 +275,12 @@ class FakeRecommendationService:
         self.last_refresh_stocks_force = False
         self.last_refresh_all_market: str | None = None
         self.last_refresh_all_sector: str | None = None
+        self.last_refresh_all_sectors: list[str] | None = None
         self.last_refresh_stocks_market: str | None = None
         self.last_refresh_stocks_sector: str | None = None
+        self.refresh_stocks_scopes: list[str | None] = []
+        self.last_list_sector: str | None = None
+        self.last_list_sectors: list[str] | None = None
         self.last_history_market: str | None = None
         self.last_history_limit: int | None = None
         self.last_history_offset: int | None = None
@@ -271,9 +305,68 @@ class FakeRecommendationService:
             "600519": None,
         }
         self.recommendations = [
-            _build_recommendation("AAPL", 86.0),
-            _build_recommendation("600519", 67.0),
+            _build_recommendation("AAPL", 86.0, sector="Technology"),
+            _build_recommendation("600519", 67.0, sector="Consumer"),
         ]
+
+    @classmethod
+    def _normalize_sector_key(cls, value: object) -> str:
+        normalized = "".join(str(value or "").strip().casefold().split())
+        for canonical_key, aliases in cls._SECTOR_ALIAS_GROUPS.items():
+            if normalized in aliases:
+                return canonical_key
+        return normalized
+
+    def _normalize_sector_inputs(
+        self,
+        sector: str | None = None,
+        sectors: Iterable[str] | None = None,
+    ) -> list[str]:
+        raw_values: list[str] = []
+        if sectors is not None:
+            raw_values.extend(str(value or "") for value in sectors)
+        if sector is not None:
+            raw_values.append(str(sector or ""))
+
+        normalized: list[str] = []
+        seen_keys: set[str] = set()
+        for raw_value in raw_values:
+            candidate = str(raw_value).strip()
+            if not candidate:
+                continue
+            canonical_key = self._normalize_sector_key(candidate)
+            if not canonical_key or canonical_key in seen_keys:
+                continue
+            seen_keys.add(canonical_key)
+            normalized.append(candidate)
+        return normalized
+
+    def _normalize_sector_metadata(self, value: object) -> dict[str, object]:
+        raw_value = str(value or "").strip()
+        canonical_key = self._normalize_sector_key(raw_value)
+        display_label = self._SECTOR_DISPLAY_LABELS.get(canonical_key, raw_value)
+        aliases = list(self._SECTOR_ALIAS_GROUPS.get(canonical_key, {canonical_key}))
+        if raw_value and raw_value not in aliases:
+            aliases.append(raw_value)
+        return {
+            "canonical_key": canonical_key,
+            "display_label": display_label,
+            "aliases": aliases,
+            "raw_provider_label": raw_value,
+        }
+
+    def _matches_sector_filters(
+        self,
+        recommendation: StockRecommendation,
+        normalized_inputs: list[str],
+    ) -> bool:
+        if not normalized_inputs:
+            return True
+        target_keys = {self._normalize_sector_key(value) for value in normalized_inputs}
+        item_sector_key = self._normalize_sector_key(
+            getattr(recommendation, "sector", None)
+        )
+        return item_sector_key in target_keys
 
     def get_analysis_record_id_for_recommendation(
         self,
@@ -318,11 +411,21 @@ class FakeRecommendationService:
         force: bool = False,
         market: str | None = None,
         sector: str | None = None,
+        sectors: Iterable[str] | None = None,
     ) -> list[StockRecommendation]:
         self.last_refresh_all_force = force
         self.last_refresh_all_market = market
         self.last_refresh_all_sector = sector
-        return list(self.recommendations)
+        self.last_refresh_all_sectors = list(sectors) if sectors is not None else None
+
+        normalized_inputs = self._normalize_sector_inputs(
+            sector=sector, sectors=sectors
+        )
+        return [
+            item
+            for item in self.recommendations
+            if self._matches_sector_filters(item, normalized_inputs)
+        ]
 
     def refresh_stocks(
         self,
@@ -334,23 +437,66 @@ class FakeRecommendationService:
         self.last_refresh_stocks_force = force
         self.last_refresh_stocks_market = market
         self.last_refresh_stocks_sector = sector
+        self.refresh_stocks_scopes.append(sector)
         if not codes:
             return []
-        target = codes[0].strip().upper()
-        if target == "NONE":
-            return []
-        return [_build_recommendation(target, 82.0)]
+
+        normalized_scope = self._normalize_sector_inputs(sector=sector)
+        normalized_market = str(market or "").strip().upper() if market else None
+        lookup = {str(item.code).strip().upper(): item for item in self.recommendations}
+        items: list[StockRecommendation] = []
+        for raw_code in codes:
+            target = str(raw_code or "").strip().upper()
+            if not target or target == "NONE":
+                continue
+            recommendation = lookup.get(target)
+            if recommendation is None:
+                recommendation = _build_recommendation(
+                    target, 82.0, sector="Technology"
+                )
+            if normalized_market is not None:
+                item_market = (
+                    str(getattr(recommendation.region, "value", recommendation.region))
+                    .strip()
+                    .upper()
+                )
+                if item_market != normalized_market:
+                    continue
+            if not self._matches_sector_filters(recommendation, normalized_scope):
+                continue
+            items.append(recommendation)
+        return items
 
     def get_recommendations(
         self,
         priority: str | None = None,
         sector: str | None = None,
+        sectors: Iterable[str] | None = None,
         region: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[StockRecommendation], int]:
-        _ = (priority, sector, region, limit, offset)
-        return list(self.recommendations), len(self.recommendations)
+        _ = (priority, limit, offset)
+        self.last_list_sector = sector
+        self.last_list_sectors = list(sectors) if sectors is not None else None
+
+        normalized_inputs = self._normalize_sector_inputs(
+            sector=sector, sectors=sectors
+        )
+        rows = [
+            item
+            for item in self.recommendations
+            if self._matches_sector_filters(item, normalized_inputs)
+        ]
+        if region is not None:
+            normalized_region = str(region).strip().upper()
+            rows = [
+                item
+                for item in rows
+                if str(getattr(item.region, "value", item.region)).strip().upper()
+                == normalized_region
+            ]
+        return rows, len(rows)
 
     def get_priority_summary(self) -> dict[str, int]:
         return {"BUY_NOW": 1, "POSITION": 2, "WAIT_PULLBACK": 3, "NO_ENTRY": 4}
@@ -436,14 +582,23 @@ class FakeRecommendationService:
         self.hot_sector_call_count += 1
         target_market = self._normalize_market_code(market)
         self.last_hot_sector_market = target_market
+        snapshot_at = datetime(2026, 3, 20, 9, 30, 0)
+        fetched_at = datetime(2026, 3, 20, 9, 35, 0)
 
         if target_market in {"HK", "US"}:
             fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
             return [
                 {
                     "name": name,
+                    "canonical_key": self._normalize_sector_key(name),
+                    "display_label": str(name),
+                    "aliases": [str(name), self._normalize_sector_key(name)],
+                    "raw_name": str(name),
+                    "source": "overseas_fallback",
                     "change_pct": None,
                     "stock_count": len(codes),
+                    "snapshot_at": snapshot_at,
+                    "fetched_at": fetched_at,
                 }
                 for name, codes in fallback.items()
             ]
@@ -493,10 +648,17 @@ class FakeRecommendationService:
                 sectors.append(
                     {
                         "name": name,
+                        "canonical_key": self._normalize_sector_key(name),
+                        "display_label": name,
+                        "aliases": [name, self._normalize_sector_key(name)],
+                        "raw_name": name,
                         "stock_count": stock_count,
                         "change_pct": change_pct_by_sector.get(
                             self._normalize_sector_name(name)
                         ),
+                        "source": "sector_scan",
+                        "snapshot_at": snapshot_at,
+                        "fetched_at": fetched_at,
                     }
                 )
         else:
@@ -504,10 +666,17 @@ class FakeRecommendationService:
                 sectors.append(
                     {
                         "name": name,
+                        "canonical_key": self._normalize_sector_key(name),
+                        "display_label": name,
+                        "aliases": [name, self._normalize_sector_key(name)],
+                        "raw_name": name,
                         "stock_count": None,
                         "change_pct": change_pct_by_sector.get(
                             self._normalize_sector_name(name)
                         ),
+                        "source": "sector_rankings",
+                        "snapshot_at": snapshot_at,
+                        "fetched_at": fetched_at,
                     }
                 )
 
@@ -582,16 +751,13 @@ class RecommendationApiTestCase(unittest.TestCase):
         missing_market = self.client.post(
             "/api/v1/recommendation/refresh", json={"sector": "Tech"}
         )
-        self.assertEqual(missing_market.status_code, 400)
+        self.assertEqual(missing_market.status_code, 422)
         missing_market_payload = missing_market.json()
-        missing_market_error = missing_market_payload.get(
-            "detail", missing_market_payload
-        ).get("error", "")
-        self.assertEqual(missing_market_error, "validation_error")
-        missing_market_message = missing_market_payload.get(
-            "detail", missing_market_payload
-        ).get("message", "")
-        self.assertIn("market is required", missing_market_message)
+        missing_market_detail = missing_market_payload.get("detail", [])
+        self.assertTrue(
+            isinstance(missing_market_detail, list) and missing_market_detail
+        )
+        self.assertEqual(missing_market_detail[0].get("loc", [])[-1], "market")
 
         market_only = self.client.post(
             "/api/v1/recommendation/refresh", json={"market": "CN"}
@@ -627,13 +793,17 @@ class RecommendationApiTestCase(unittest.TestCase):
         )
         self.assertEqual(full_response.status_code, 200)
         full_data = full_response.json()
-        self.assertEqual(full_data["total"], 2)
-        self.assertEqual(len(full_data["items"]), 2)
+        self.assertEqual(full_data["total"], 1)
+        self.assertEqual(len(full_data["items"]), 1)
         self.assertEqual(full_data["items"][0]["analysis_record_id"], 201)
-        self.assertIsNone(full_data["items"][1]["analysis_record_id"])
+        self.assertEqual(full_data["items"][0]["canonical_key"], "technology")
+        self.assertEqual(full_data["items"][0]["display_label"], "Technology")
+        self.assertIn("technology", full_data["items"][0]["aliases"])
         self.assertFalse(self.fake_service.last_refresh_all_force)
         self.assertEqual(self.fake_service.last_refresh_all_market, "US")
         self.assertEqual(self.fake_service.last_refresh_all_sector, "Tech")
+        self.assertEqual(full_data["filters"]["sector"], "Tech")
+        self.assertEqual(full_data["filters"]["sectors"], ["Tech"])
 
         force_response = self.client.post(
             "/api/v1/recommendation/refresh",
@@ -656,6 +826,7 @@ class RecommendationApiTestCase(unittest.TestCase):
             json={"region": "US", "industry": "Tech"},
         )
         self.assertEqual(alias_response.status_code, 200)
+        self.assertEqual(alias_response.json()["filters"]["sectors"], ["Tech"])
 
         single_response = self.client.post(
             "/api/v1/recommendation/refresh/AAPL",
@@ -667,6 +838,9 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertEqual(single_data["stock_code"], "AAPL")
         self.assertEqual(single_data["priority"], "BUY_NOW")
         self.assertEqual(single_data["analysis_record_id"], 201)
+        self.assertEqual(single_data["canonical_key"], "technology")
+        self.assertEqual(single_data["display_label"], "Technology")
+        self.assertIn("technology", single_data["aliases"])
         self.assertGreater(self.fake_service.analysis_record_lookup_count, 0)
         self.assertTrue(self.fake_service.last_refresh_stocks_force)
 
@@ -674,6 +848,20 @@ class RecommendationApiTestCase(unittest.TestCase):
             "/api/v1/recommendation/refresh/NONE", json={}
         )
         self.assertEqual(not_found_response.status_code, 404)
+
+    def test_refresh_stock_scoped_market_only_without_sector_is_supported(self) -> None:
+        response = self.client.post(
+            "/api/v1/recommendation/refresh",
+            json={"stock_codes": ["AAPL", "600519"], "market": "US"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([item["stock_code"] for item in payload["items"]], ["AAPL"])
+        self.assertEqual(payload["filters"]["market"], "US")
+        self.assertIsNone(payload["filters"]["sector"])
+        self.assertEqual(payload["filters"]["sectors"], [])
+        self.assertEqual(self.fake_service.last_refresh_stocks_market, "US")
+        self.assertIsNone(self.fake_service.last_refresh_stocks_sector)
 
     def test_refresh_endpoint_same_day_reuse_identity(self) -> None:
         def _analysis_id_by_refresh_mode(
@@ -779,12 +967,16 @@ class RecommendationApiTestCase(unittest.TestCase):
         )
         self.assertEqual(list_response.status_code, 200)
         list_data = list_response.json()
-        self.assertEqual(list_data["total"], 2)
+        self.assertEqual(list_data["total"], 1)
         self.assertEqual(list_data["filters"]["market"], "US")
+        self.assertEqual(list_data["filters"]["sector"], "Tech")
+        self.assertEqual(list_data["filters"]["sectors"], ["Tech"])
         self.assertIn("scores", list_data["items"][0])
         self.assertEqual(list_data["items"][0]["analysis_record_id"], 201)
-        self.assertIsNone(list_data["items"][1]["analysis_record_id"])
-        self.assertGreaterEqual(self.fake_service.analysis_record_lookup_count, 2)
+        self.assertEqual(list_data["items"][0]["canonical_key"], "technology")
+        self.assertEqual(list_data["items"][0]["display_label"], "Technology")
+        self.assertIn("technology", list_data["items"][0]["aliases"])
+        self.assertGreaterEqual(self.fake_service.analysis_record_lookup_count, 1)
 
         summary_response = self.client.get("/api/v1/recommendation/summary")
         self.assertEqual(summary_response.status_code, 200)
@@ -796,6 +988,146 @@ class RecommendationApiTestCase(unittest.TestCase):
         params = openapi["paths"]["/api/v1/recommendation/list"]["get"]["parameters"]
         param_names = {item["name"] for item in params}
         self.assertNotIn("limit", param_names)
+        self.assertIn("sectors", param_names)
+
+        refresh_request_schema_ref = openapi["paths"]["/api/v1/recommendation/refresh"][
+            "post"
+        ]["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+        refresh_schema_name = refresh_request_schema_ref.rsplit("/", 1)[-1]
+        refresh_schema = openapi["components"]["schemas"][refresh_schema_name]
+        self.assertIn("market", refresh_schema.get("required", []))
+
+    def test_list_multi_sector_and_alias_filters_are_backward_compatible(self) -> None:
+        multi_response = self.client.get(
+            "/api/v1/recommendation/list",
+            params=[
+                ("sectors", "Technology"),
+                ("sectors", "Tech"),
+                ("sectors", "technology"),
+                ("sectors", "Consumer"),
+                ("sectors", "Consumer"),
+            ],
+        )
+        self.assertEqual(multi_response.status_code, 200)
+        multi_payload = multi_response.json()
+        self.assertEqual(multi_payload["total"], 2)
+        self.assertEqual(
+            {item["stock_code"] for item in multi_payload["items"]},
+            {"AAPL", "600519"},
+        )
+        self.assertEqual(
+            multi_payload["filters"]["sectors"],
+            ["Technology", "Consumer"],
+        )
+        self.assertEqual(multi_payload["filters"]["sector"], "Technology")
+
+        alias_response = self.client.get(
+            "/api/v1/recommendation/list",
+            params={"market": "US", "sector": "Tech"},
+        )
+        canonical_response = self.client.get(
+            "/api/v1/recommendation/list",
+            params=[("market", "US"), ("sectors", "Technology")],
+        )
+        self.assertEqual(alias_response.status_code, 200)
+        self.assertEqual(canonical_response.status_code, 200)
+
+        alias_codes = [item["stock_code"] for item in alias_response.json()["items"]]
+        canonical_codes = [
+            item["stock_code"] for item in canonical_response.json()["items"]
+        ]
+        self.assertEqual(alias_codes, canonical_codes)
+        self.assertEqual(alias_codes, ["AAPL"])
+        self.assertEqual(alias_response.json()["filters"]["sector"], "Tech")
+        self.assertEqual(alias_response.json()["filters"]["sectors"], ["Tech"])
+        self.assertEqual(
+            canonical_response.json()["filters"]["sector"],
+            "Technology",
+        )
+        self.assertEqual(
+            canonical_response.json()["filters"]["sectors"],
+            ["Technology"],
+        )
+        self.assertEqual(alias_response.json()["items"][0]["sector"], "Technology")
+        self.assertEqual(
+            alias_response.json()["items"][0]["sectors"],
+            ["Technology"],
+        )
+
+    def test_refresh_multi_sector_and_alias_contract(self) -> None:
+        multi_response = self.client.post(
+            "/api/v1/recommendation/refresh",
+            json={
+                "market": "US",
+                "sectors": [
+                    "Technology",
+                    "Consumer",
+                    "Tech",
+                    "Consumer",
+                    "technology",
+                ],
+            },
+        )
+        self.assertEqual(multi_response.status_code, 200)
+        multi_payload = multi_response.json()
+        self.assertEqual(multi_payload["total"], 2)
+        self.assertEqual(
+            {item["stock_code"] for item in multi_payload["items"]},
+            {"AAPL", "600519"},
+        )
+        self.assertEqual(
+            multi_payload["filters"]["sectors"],
+            ["Technology", "Consumer"],
+        )
+        self.assertEqual(multi_payload["filters"]["sector"], "Technology")
+        self.assertEqual(
+            self.fake_service.last_refresh_all_sectors,
+            ["Technology", "Consumer"],
+        )
+
+        legacy_response = self.client.post(
+            "/api/v1/recommendation/refresh",
+            json={"market": "US", "sector": "Tech"},
+        )
+        canonical_response = self.client.post(
+            "/api/v1/recommendation/refresh",
+            json={"market": "US", "sectors": ["Technology"]},
+        )
+        self.assertEqual(legacy_response.status_code, 200)
+        self.assertEqual(canonical_response.status_code, 200)
+        self.assertEqual(legacy_response.json()["filters"]["sector"], "Tech")
+        self.assertEqual(legacy_response.json()["filters"]["sectors"], ["Tech"])
+        self.assertEqual(canonical_response.json()["filters"]["sector"], "Technology")
+        self.assertEqual(
+            canonical_response.json()["filters"]["sectors"],
+            ["Technology"],
+        )
+        self.assertEqual(
+            [item["stock_code"] for item in legacy_response.json()["items"]],
+            [item["stock_code"] for item in canonical_response.json()["items"]],
+        )
+
+        multi_scope_refresh = self.client.post(
+            "/api/v1/recommendation/refresh",
+            json={
+                "stock_codes": ["AAPL", "600519", "AAPL"],
+                "market": "US",
+                "sectors": ["Technology", "Consumer", "Tech", "Consumer"],
+            },
+        )
+        self.assertEqual(multi_scope_refresh.status_code, 200)
+        self.assertEqual(
+            multi_scope_refresh.json()["filters"]["sectors"],
+            ["Technology", "Consumer"],
+        )
+        scoped_codes = [
+            item["stock_code"] for item in multi_scope_refresh.json()["items"]
+        ]
+        self.assertEqual(scoped_codes, ["AAPL"])
+        self.assertEqual(
+            self.fake_service.refresh_stocks_scopes[-2:],
+            ["Technology", "Consumer"],
+        )
 
     def test_history_get_and_delete_endpoints(self) -> None:
         page_one_response = self.client.get(
@@ -969,6 +1301,16 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertAlmostEqual(sectors[0]["change_pct"], 2.6)
         self.assertAlmostEqual(sectors[1]["change_pct"], 1.3)
         self.assertIsNone(sectors[2]["change_pct"])
+        self.assertEqual(
+            sectors[0]["canonical_key"],
+            self.fake_service._normalize_sector_key("半导体"),
+        )
+        self.assertEqual(sectors[0]["display_label"], "半导体")
+        self.assertEqual(sectors[0]["raw_name"], "半导体")
+        self.assertEqual(sectors[0]["source"], "sector_scan")
+        self.assertIn("半导体", sectors[0]["aliases"])
+        self.assertIsNotNone(sectors[0]["snapshot_at"])
+        self.assertIsNotNone(sectors[0]["fetched_at"])
         self.assertEqual(self.fake_service.hot_sector_call_count, 1)
         self.assertEqual(self.fake_service.last_hot_sector_market, "CN")
 
@@ -989,6 +1331,14 @@ class RecommendationApiTestCase(unittest.TestCase):
                 [len(expected[name]) for name in expected_names],
             )
             self.assertTrue(all(item["change_pct"] is None for item in sectors))
+            self.assertTrue(all(item["canonical_key"] for item in sectors))
+            self.assertTrue(all(item["display_label"] for item in sectors))
+            self.assertTrue(all(item["raw_name"] for item in sectors))
+            self.assertTrue(
+                all(item["source"] == "overseas_fallback" for item in sectors)
+            )
+            self.assertTrue(all(item["snapshot_at"] for item in sectors))
+            self.assertTrue(all(item["fetched_at"] for item in sectors))
             self.assertEqual(self.fake_service.last_hot_sector_market, market)
         self.assertEqual(self.fake_service.hot_sector_call_count, 2)
 

@@ -272,6 +272,8 @@ const normalizeHotSectorsResponse = (input: Record<string, unknown>): Recommenda
         source: toNonEmptyStringOrNull(sector.source),
         changePct: typeof sector.changePct === 'number' ? sector.changePct : null,
         stockCount: typeof sector.stockCount === 'number' ? sector.stockCount : null,
+        isHot: typeof sector.isHot === 'boolean' ? sector.isHot : false,
+        hotRank: typeof sector.hotRank === 'number' && Number.isFinite(sector.hotRank) ? sector.hotRank : null,
         snapshotAt: toNonEmptyStringOrNull(sector.snapshotAt),
         fetchedAt: toNonEmptyStringOrNull(sector.fetchedAt),
       } satisfies RecommendationHotSector;

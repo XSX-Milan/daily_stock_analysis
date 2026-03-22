@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import importlib
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Iterable, cast
@@ -56,6 +57,10 @@ class RecommendationService:
     SECTOR_CACHE_TYPE = "industry"
     AUTO_REFRESH_SECTOR_LIMIT = 3
     HOT_SECTOR_SNAPSHOT_TTL_MINUTES = 30
+    OVERSEAS_YF_SCREEN_REGION_MAPPING: dict[str, str] = {
+        "US": "us",
+        "HK": "hk",
+    }
     SCORING_WEIGHT_CONFIG_MAPPING: tuple[tuple[str, str, str, int], ...] = (
         ("technical", "RECOMMEND_WEIGHT_TECHNICAL", "recommend_weight_technical", 30),
         (
@@ -1556,11 +1561,15 @@ class RecommendationService:
             include_stale=True,
         )
         if snapshot and not bool(snapshot.get("is_stale")):
-            return self._canonicalize_hot_sector_items(
+            cached_items = self._canonicalize_hot_sector_items(
                 snapshot.get("items") or [],
                 market=target_market,
                 snapshot_at=snapshot.get("snapshot_at"),
                 fetched_at=snapshot.get("fetched_at"),
+            )
+            return self._canonicalize_hot_sector_items(
+                self._decorate_hot_sector_items(cached_items, target_market),
+                market=target_market,
             )
 
         stale_snapshot_items: list[dict[str, Any]] = []
@@ -1570,6 +1579,10 @@ class RecommendationService:
                 market=target_market,
                 snapshot_at=snapshot.get("snapshot_at"),
                 fetched_at=snapshot.get("fetched_at"),
+            )
+            stale_snapshot_items = self._canonicalize_hot_sector_items(
+                self._decorate_hot_sector_items(stale_snapshot_items, target_market),
+                market=target_market,
             )
 
         try:
@@ -1589,6 +1602,10 @@ class RecommendationService:
                 market=target_market,
                 snapshot_at=snapshot_at,
             )
+            fresh_items = self._canonicalize_hot_sector_items(
+                self._decorate_hot_sector_items(fresh_items, target_market),
+                market=target_market,
+            )
             if fresh_items:
                 try:
                     self.recommendation_repo.upsert_hot_sector_snapshot(
@@ -1607,102 +1624,334 @@ class RecommendationService:
 
         return stale_snapshot_items
 
+    def _decorate_hot_sector_items(
+        self,
+        items: Iterable[dict[str, Any]],
+        market: str,
+    ) -> list[dict[str, Any]]:
+        """Attach hot flags and ranks to sector items by market-specific rules."""
+        normalized_market = str(market or "").strip().upper()
+        overseas_hot_rank_map = (
+            self._build_overseas_hot_rank_map(normalized_market)
+            if normalized_market in {"HK", "US"}
+            else {}
+        )
+
+        cn_rank_candidates: list[tuple[str, float]] = []
+        if normalized_market == "CN":
+            for item in items:
+                canonical_key = str(item.get("canonical_key") or "").strip()
+                if not canonical_key:
+                    continue
+                change_pct = self._extract_sector_change_pct(item)
+                if change_pct is None:
+                    continue
+                cn_rank_candidates.append((canonical_key, change_pct))
+            cn_rank_candidates.sort(key=lambda entry: entry[1], reverse=True)
+
+        cn_hot_rank_map: dict[str, int] = {}
+        for rank, (canonical_key, _change_pct) in enumerate(
+            cn_rank_candidates, start=1
+        ):
+            if canonical_key in cn_hot_rank_map:
+                continue
+            cn_hot_rank_map[canonical_key] = rank
+
+        decorated: list[dict[str, Any]] = []
+        for item in items:
+            next_item = dict(item)
+            canonical_key = str(next_item.get("canonical_key") or "").strip()
+
+            raw_hot_rank = next_item.get("hot_rank")
+            if isinstance(raw_hot_rank, int) and raw_hot_rank > 0:
+                hot_rank: int | None = raw_hot_rank
+            elif isinstance(raw_hot_rank, float) and raw_hot_rank > 0:
+                hot_rank = int(raw_hot_rank)
+            elif isinstance(raw_hot_rank, str):
+                try:
+                    parsed_hot_rank = int(raw_hot_rank)
+                    hot_rank = parsed_hot_rank if parsed_hot_rank > 0 else None
+                except (TypeError, ValueError):
+                    hot_rank = None
+            else:
+                hot_rank = None
+
+            if hot_rank is None and canonical_key:
+                if normalized_market in {"HK", "US"}:
+                    hot_rank = overseas_hot_rank_map.get(canonical_key)
+                elif normalized_market == "CN":
+                    hot_rank = cn_hot_rank_map.get(canonical_key)
+
+            is_hot = bool(next_item.get("is_hot"))
+            if hot_rank is not None:
+                is_hot = True
+
+            next_item["is_hot"] = is_hot
+            next_item["hot_rank"] = hot_rank
+            decorated.append(next_item)
+
+        return decorated
+
     def _fetch_hot_sector_items_from_upstream(
         self,
         target_market: str,
     ) -> list[dict[str, Any]]:
+        """Dispatch market-specific hot-sector collection strategy."""
         if target_market in {"HK", "US"}:
-            fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
-            return [
-                {
-                    "name": str(name or "").strip(),
-                    "raw_name": str(name or "").strip(),
-                    "change_pct": None,
-                    "stock_count": len(codes),
-                    "source": "overseas_fallback",
-                }
-                for name, codes in fallback.items()
-                if str(name or "").strip()
-            ]
+            return self._fetch_overseas_hot_sector_items(target_market)
 
-        scanned: list[tuple[str, list[str]]] = []
-        try:
-            scanned = self.sector_scanner_service.scan_sectors() or []
-        except Exception as exc:
-            logger.warning("Failed to scan CN hot sectors: %s", exc)
+        return self._fetch_cn_hot_sector_items()
 
-        change_pct_by_canonical: dict[str, float] = {}
-        ranking_sector_names: list[str] = []
-        ranking_sector_keys: set[str] = set()
+    def _fetch_cn_hot_sector_items(self) -> list[dict[str, Any]]:
+        """Build CN sector items using all-sector names and ranking metadata."""
         fetcher = getattr(self.sector_scanner_service, "data_fetcher", None)
-        try:
-            top_sectors, _ = (
-                fetcher.get_sector_rankings(3) if fetcher is not None else ([], [])
-            )
-            for item in top_sectors or []:
-                name = self._extract_sector_name(item)
-                if not name:
-                    continue
+        all_sector_names: list[str] = []
+        if fetcher is not None and hasattr(fetcher, "get_all_sector_names"):
+            try:
+                raw_names = fetcher.get_all_sector_names()
+                if isinstance(raw_names, list):
+                    for raw_name in raw_names:
+                        name = str(raw_name or "").strip()
+                        if name and name not in all_sector_names:
+                            all_sector_names.append(name)
+            except Exception as exc:
+                logger.warning("Failed to fetch CN all-sector names: %s", exc)
 
-                metadata = self._normalize_sector_metadata(name)
-                canonical_key = str(metadata.get("canonical_key") or "").strip()
-                if not canonical_key:
-                    continue
+        ranking_items: list[dict[str, Any]] = []
+        if fetcher is not None:
+            try:
+                top_sectors, _ = fetcher.get_sector_rankings(20)
+                if isinstance(top_sectors, list):
+                    ranking_items = [
+                        item for item in top_sectors if isinstance(item, dict)
+                    ]
+            except Exception as exc:
+                logger.warning("Failed to fetch CN sector rankings: %s", exc)
 
-                if canonical_key not in ranking_sector_keys:
-                    ranking_sector_names.append(name)
-                    ranking_sector_keys.add(canonical_key)
+        ranking_order: list[str] = []
+        ranking_order_set: set[str] = set()
+        ranking_change_pct: dict[str, float] = {}
+        for index, ranking_item in enumerate(ranking_items):
+            _ = index
+            name = self._extract_sector_name(ranking_item)
+            if not name:
+                continue
 
-                change_pct = self._extract_sector_change_pct(item)
-                if change_pct is not None:
-                    change_pct_by_canonical[canonical_key] = change_pct
-        except Exception as exc:
-            logger.warning("Failed to fetch CN sector rankings: %s", exc)
+            metadata = self._normalize_sector_metadata(name)
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            if not canonical_key:
+                continue
+
+            if canonical_key not in ranking_order_set:
+                ranking_order.append(canonical_key)
+                ranking_order_set.add(canonical_key)
+
+            change_pct = self._extract_sector_change_pct(ranking_item)
+            if change_pct is not None:
+                ranking_change_pct[canonical_key] = change_pct
+
+        hot_rank_by_key = {
+            canonical_key: rank
+            for rank, canonical_key in enumerate(ranking_order, start=1)
+        }
 
         sectors: list[dict[str, Any]] = []
-        if scanned:
-            for sector_name, stock_codes in scanned[:3]:
-                name = str(sector_name or "").strip()
-                if not name:
-                    continue
-                canonical_key = str(
-                    self._normalize_sector_metadata(name).get("canonical_key") or ""
-                ).strip()
-                if not canonical_key:
-                    continue
+        seen: set[str] = set()
 
-                stock_count = (
-                    len(stock_codes) if isinstance(stock_codes, list) else None
-                )
-                sectors.append(
-                    {
-                        "name": name,
-                        "raw_name": name,
-                        "stock_count": stock_count,
-                        "change_pct": change_pct_by_canonical.get(canonical_key),
-                        "source": "sector_scan",
-                    }
-                )
-        else:
-            for name in ranking_sector_names[:3]:
-                sectors.append(
-                    {
-                        "name": name,
-                        "raw_name": name,
-                        "stock_count": None,
-                        "change_pct": change_pct_by_canonical.get(
-                            str(
-                                self._normalize_sector_metadata(name).get(
-                                    "canonical_key"
-                                )
-                                or ""
-                            ).strip()
-                        ),
-                        "source": "sector_rankings",
-                    }
-                )
+        for name in all_sector_names:
+            metadata = self._normalize_sector_metadata(name)
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            if not canonical_key or canonical_key in seen:
+                continue
+
+            seen.add(canonical_key)
+            hot_rank = hot_rank_by_key.get(canonical_key)
+            sectors.append(
+                {
+                    "name": str(metadata.get("display_label") or name).strip() or name,
+                    "raw_name": name,
+                    "source": "cn_all_sectors",
+                    "change_pct": ranking_change_pct.get(canonical_key),
+                    "stock_count": None,
+                    "is_hot": hot_rank is not None,
+                    "hot_rank": hot_rank,
+                }
+            )
+
+        for ranking_item in ranking_items:
+            name = self._extract_sector_name(ranking_item)
+            if not name:
+                continue
+
+            metadata = self._normalize_sector_metadata(name)
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            if not canonical_key or canonical_key in seen:
+                continue
+
+            seen.add(canonical_key)
+            hot_rank = hot_rank_by_key.get(canonical_key)
+            sectors.append(
+                {
+                    "name": str(metadata.get("display_label") or name).strip() or name,
+                    "raw_name": name,
+                    "source": "sector_rankings",
+                    "change_pct": self._extract_sector_change_pct(ranking_item),
+                    "stock_count": None,
+                    "is_hot": hot_rank is not None,
+                    "hot_rank": hot_rank,
+                }
+            )
 
         return sectors
+
+    def _fetch_overseas_hot_sector_items(
+        self, target_market: str
+    ) -> list[dict[str, Any]]:
+        """Build overseas sector items from yfinance screener with fallback."""
+        region = self.OVERSEAS_YF_SCREEN_REGION_MAPPING.get(target_market)
+        if not region:
+            return []
+
+        sector_names = self._load_overseas_sector_names_from_yfinance()
+        hot_rank_by_key = self._build_overseas_hot_rank_map(target_market)
+        sectors: list[dict[str, Any]] = []
+
+        for sector_name in sector_names:
+            total = self._query_overseas_sector_total(
+                sector_name=sector_name,
+                region=region,
+            )
+            if total <= 0:
+                continue
+
+            metadata = self._normalize_sector_metadata(sector_name)
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            hot_rank = hot_rank_by_key.get(canonical_key)
+
+            sectors.append(
+                {
+                    "name": str(metadata.get("display_label") or sector_name).strip()
+                    or sector_name,
+                    "raw_name": sector_name,
+                    "source": "yfinance_screen",
+                    "change_pct": None,
+                    "stock_count": total,
+                    "is_hot": hot_rank is not None,
+                    "hot_rank": hot_rank,
+                }
+            )
+
+        if sectors:
+            return sectors
+
+        fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
+        fallback_items: list[dict[str, Any]] = []
+        for name, codes in fallback.items():
+            normalized_name = str(name or "").strip()
+            if not normalized_name:
+                continue
+
+            metadata = self._normalize_sector_metadata(normalized_name)
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            hot_rank = hot_rank_by_key.get(canonical_key)
+            fallback_items.append(
+                {
+                    "name": str(
+                        metadata.get("display_label") or normalized_name
+                    ).strip()
+                    or normalized_name,
+                    "raw_name": normalized_name,
+                    "source": "overseas_fallback",
+                    "change_pct": None,
+                    "stock_count": len(codes or []),
+                    "is_hot": hot_rank is not None,
+                    "hot_rank": hot_rank,
+                }
+            )
+        return fallback_items
+
+    def _load_overseas_sector_names_from_yfinance(self) -> list[str]:
+        """Load deduplicated overseas sector names from yfinance taxonomy mapping."""
+        try:
+            yf = importlib.import_module("yfinance")
+        except Exception as exc:
+            logger.warning("Failed to import yfinance for sector enum: %s", exc)
+            return []
+
+        const_module = getattr(yf, "const", None)
+        if const_module is None:
+            return []
+
+        mapping = getattr(const_module, "SECTOR_INDUSTY_MAPPING", None)
+        if not isinstance(mapping, dict):
+            return []
+
+        names: list[str] = []
+        for raw_name in mapping.keys():
+            name = str(raw_name or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _query_overseas_sector_total(self, *, sector_name: str, region: str) -> int:
+        """Query yfinance screener and return total symbols for one sector+region."""
+        try:
+            yf = importlib.import_module("yfinance")
+            equity_query = getattr(yf, "EquityQuery", None)
+            screen = getattr(yf, "screen", None)
+            if equity_query is None or not callable(screen):
+                return 0
+
+            query = equity_query(
+                "and",
+                [
+                    equity_query("eq", ["sector", sector_name]),
+                    equity_query("eq", ["region", region]),
+                ],
+            )
+            payload = screen(query, offset=0, size=1)
+            if not isinstance(payload, dict):
+                return 0
+
+            total = payload.get("total")
+            if isinstance(total, bool):
+                return int(total)
+            if isinstance(total, int):
+                return max(0, total)
+            if isinstance(total, float):
+                return max(0, int(total))
+            if isinstance(total, str):
+                try:
+                    return max(0, int(total))
+                except (TypeError, ValueError):
+                    pass
+
+            quotes = payload.get("quotes")
+            if isinstance(quotes, list) and quotes:
+                return len(quotes)
+            return 0
+        except Exception as exc:
+            logger.warning(
+                "Failed to query yfinance screen sector=%s region=%s: %s",
+                sector_name,
+                region,
+                exc,
+            )
+            return 0
+
+    def _build_overseas_hot_rank_map(self, target_market: str) -> dict[str, int]:
+        """Build a deterministic hot-rank map from configured overseas fallback sectors."""
+        fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
+        rank_map: dict[str, int] = {}
+        rank = 1
+        for raw_name in fallback.keys():
+            metadata = self._normalize_sector_metadata(raw_name)
+            canonical_key = str(metadata.get("canonical_key") or "").strip()
+            if not canonical_key or canonical_key in rank_map:
+                continue
+            rank_map[canonical_key] = rank
+            rank += 1
+        return rank_map
 
     def _canonicalize_hot_sector_items(
         self,
@@ -1749,6 +1998,20 @@ class RecommendationService:
                 and normalized.get("stock_count") is not None
             ):
                 existing["stock_count"] = normalized.get("stock_count")
+            if bool(existing.get("is_hot")) is False and bool(normalized.get("is_hot")):
+                existing["is_hot"] = True
+
+            existing_hot_rank = existing.get("hot_rank")
+            normalized_hot_rank = normalized.get("hot_rank")
+            if existing_hot_rank is None and normalized_hot_rank is not None:
+                existing["hot_rank"] = normalized_hot_rank
+            elif (
+                isinstance(existing_hot_rank, int)
+                and isinstance(normalized_hot_rank, int)
+                and normalized_hot_rank > 0
+                and normalized_hot_rank < existing_hot_rank
+            ):
+                existing["hot_rank"] = normalized_hot_rank
             if str(existing.get("source") or "").strip() == "":
                 existing["source"] = normalized.get("source")
             if str(existing.get("raw_name") or "").strip() == "":
@@ -1756,7 +2019,19 @@ class RecommendationService:
 
         normalized_items = [merged_by_canonical[key] for key in ordered_keys]
 
-        def _sort_key(item: dict[str, Any]) -> tuple[float, int, str]:
+        def _sort_key(item: dict[str, Any]) -> tuple[int, int, float, int, str]:
+            """Sort hot sectors first, then momentum, then stock count and key."""
+            raw_hot_rank = item.get("hot_rank")
+            if isinstance(raw_hot_rank, int) and raw_hot_rank > 0:
+                hot_group = 0
+                hot_rank = raw_hot_rank
+            elif bool(item.get("is_hot")):
+                hot_group = 0
+                hot_rank = 10**9
+            else:
+                hot_group = 1
+                hot_rank = 10**9
+
             raw_change_pct = item.get("change_pct")
             if isinstance(raw_change_pct, (int, float)):
                 change_pct_rank = float(raw_change_pct)
@@ -1784,6 +2059,8 @@ class RecommendationService:
                 stock_count_rank = -1
 
             return (
+                hot_group,
+                hot_rank,
                 -change_pct_rank,
                 -stock_count_rank,
                 str(item.get("canonical_key") or ""),
@@ -1833,6 +2110,18 @@ class RecommendationService:
         except (TypeError, ValueError):
             stock_count = None
 
+        raw_hot_rank = item.get("hot_rank")
+        try:
+            hot_rank = int(raw_hot_rank) if raw_hot_rank is not None else None
+        except (TypeError, ValueError):
+            hot_rank = None
+        if isinstance(hot_rank, int) and hot_rank <= 0:
+            hot_rank = None
+
+        is_hot = bool(item.get("is_hot"))
+        if hot_rank is not None:
+            is_hot = True
+
         item_snapshot_at = item.get("snapshot_at")
         resolved_snapshot_at = (
             item_snapshot_at
@@ -1854,6 +2143,8 @@ class RecommendationService:
             "source": str(item.get("source") or "").strip(),
             "change_pct": normalized_change_pct,
             "stock_count": stock_count,
+            "is_hot": is_hot,
+            "hot_rank": hot_rank,
             "snapshot_at": resolved_snapshot_at,
             "fetched_at": resolved_fetched_at,
         }

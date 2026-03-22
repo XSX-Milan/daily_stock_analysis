@@ -1,6 +1,7 @@
 import type React from 'react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { RecommendationItem, RecommendationHotSector } from '../../types/recommendation';
+import { Pagination } from '../common/Pagination';
 
 export interface SectorFiltersProps {
   recommendations: RecommendationItem[];
@@ -8,12 +9,15 @@ export interface SectorFiltersProps {
   onSectorToggle: (sector: string | string[]) => void;
   onClearAll: () => void;
   hotSectors?: RecommendationHotSector[];
+  enablePagination?: boolean;
+  pageSize?: number;
 }
 
 type Group = {
   key: string;
   display: string;
   isHot: boolean;
+  hotRank: number | null;
   isSelected: boolean;
   activeTokens: string[];
 };
@@ -24,7 +28,11 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
   onSectorToggle,
   onClearAll,
   hotSectors = [],
+  enablePagination = false,
+  pageSize = 20,
 }) => {
+  const [currentPage, setCurrentPage] = useState(1);
+
   const { groups } = useMemo(() => {
     const canonicalMap = new Map<string, Group>();
     const aliasToKey = new Map<string, string>();
@@ -33,7 +41,8 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
       primaryKey: string,
       display: string,
       aliases: string[],
-      isHot: boolean
+      isHot: boolean,
+      hotRank: number | null
     ) => {
       const pKeyLower = primaryKey.toLowerCase().replace(/\s+/g, '');
       let keyToUse = aliasToKey.get(pKeyLower) || primaryKey.toLowerCase().trim();
@@ -65,8 +74,21 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
           existing.display = display;
         }
         existing.isHot = existing.isHot || isHot;
+        const existingHotRank = existing.hotRank;
+        if (existingHotRank === null && hotRank !== null) {
+          existing.hotRank = hotRank;
+        } else if (existingHotRank !== null && hotRank !== null && hotRank < existingHotRank) {
+          existing.hotRank = hotRank;
+        }
       } else {
-        canonicalMap.set(keyToUse, { key: keyToUse, display, isHot, isSelected: false, activeTokens: [] });
+        canonicalMap.set(keyToUse, {
+          key: keyToUse,
+          display,
+          isHot,
+          hotRank,
+          isSelected: false,
+          activeTokens: [],
+        });
       }
     };
 
@@ -75,7 +97,12 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
       if (!name) return;
       const primaryKey = hs.canonicalKey?.trim() || name;
       const display = hs.displayLabel?.trim() || name;
-      addGroup(primaryKey, display, hs.aliases || [], true);
+      const isHot = typeof hs.isHot === 'boolean' ? hs.isHot : true;
+      const hotRank =
+        typeof hs.hotRank === 'number' && Number.isFinite(hs.hotRank) && hs.hotRank > 0
+          ? hs.hotRank
+          : null;
+      addGroup(primaryKey, display, hs.aliases || [], isHot, hotRank);
     });
 
     recommendations.forEach((item) => {
@@ -91,14 +118,14 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
         const primaryKey = item.sectorCanonicalKey?.trim() || itemSectors[0];
         const display = item.sectorDisplayLabel?.trim() || itemSectors[0];
         const aliases = [...itemSectors, ...(item.sectorAliases || [])];
-        addGroup(primaryKey, display, aliases, false);
+        addGroup(primaryKey, display, aliases, false, null);
       }
     });
 
     selectedSectors.forEach((s) => {
       const val = s?.trim();
       if (!val) return;
-      addGroup(val, val, [], false);
+      addGroup(val, val, [], false, null);
     });
 
     selectedSectors.forEach((s) => {
@@ -128,12 +155,34 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
       const bHot = b.isHot ? 1 : 0;
       if (aHot !== bHot) return bHot - aHot;
 
+      if (a.isHot && b.isHot) {
+        const aRank = a.hotRank ?? Number.MAX_SAFE_INTEGER;
+        const bRank = b.hotRank ?? Number.MAX_SAFE_INTEGER;
+        if (aRank !== bRank) {
+          return aRank - bRank;
+        }
+      }
+
       return a.display.localeCompare(b.display, 'zh-CN');
     });
   }, [groups]);
 
-  const totalCount = recommendations.length;
+  const normalizedPageSize = Math.max(1, pageSize);
+  const totalPages = enablePagination ? Math.max(1, Math.ceil(sortedGroups.length / normalizedPageSize)) : 1;
+
+  const effectiveCurrentPage = Math.min(currentPage, totalPages);
+
+  const visibleGroups = useMemo(() => {
+    if (!enablePagination) {
+      return sortedGroups;
+    }
+
+    const start = (effectiveCurrentPage - 1) * normalizedPageSize;
+    return sortedGroups.slice(start, start + normalizedPageSize);
+  }, [effectiveCurrentPage, enablePagination, normalizedPageSize, sortedGroups]);
+
   const sectorCount = sortedGroups.length;
+  const totalCount = sectorCount;
 
   return (
     <div className="flex flex-col gap-2" data-testid="sector-filters">
@@ -160,7 +209,7 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
           全部 ({totalCount})
         </button>
         
-        {sortedGroups.map((group) => {
+        {visibleGroups.map((group) => {
           return (
             <button
               key={group.key}
@@ -188,6 +237,19 @@ export const SectorFilters: React.FC<SectorFiltersProps> = ({
           );
         })}
       </div>
+
+      {enablePagination && totalPages > 1 && (
+        <div className="pt-2" data-testid="sector-filters-pagination">
+          <Pagination
+            currentPage={effectiveCurrentPage}
+            totalPages={totalPages}
+            onPageChange={(page) => {
+              const normalizedPage = Math.min(Math.max(page, 1), totalPages);
+              setCurrentPage(normalizedPage);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 };

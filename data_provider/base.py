@@ -328,6 +328,10 @@ class BaseFetcher(ABC):
         """
         return None
 
+    def get_all_sector_names(self) -> Optional[List[str]]:
+        """Return all available sector names from this fetcher if supported."""
+        return None
+
     def get_daily_data(
         self,
         stock_code: str, 
@@ -2293,3 +2297,68 @@ class DataFetcherManager:
             return top, bottom
         logger.warning(f"[板块排行] 所有数据源均失败，最终错误: {last_error}")
         return [], []
+
+    def _get_all_sector_names_with_meta(self) -> Tuple[List[str], List[Dict[str, Any]], str]:
+        """Fetch all sector names with provider fallback metadata."""
+        source_chain: List[Dict[str, Any]] = []
+        last_error = ""
+
+        for fetcher in self._fetchers:
+            if not hasattr(fetcher, 'get_all_sector_names'):
+                continue
+
+            start = time.time()
+            try:
+                data = fetcher.get_all_sector_names()
+                duration_ms = int((time.time() - start) * 1000)
+
+                names: List[str] = []
+                if isinstance(data, list):
+                    for raw_name in data:
+                        name = str(raw_name or '').strip()
+                        if name and name not in names:
+                            names.append(name)
+
+                if names:
+                    source_chain.append(
+                        {
+                            "provider": fetcher.name,
+                            "result": "ok",
+                            "duration_ms": duration_ms,
+                        }
+                    )
+                    logger.info(f"[{fetcher.name}] 获取全量板块列表成功")
+                    return names, source_chain, ""
+
+                last_error = f"{fetcher.name}返回空结果"
+                source_chain.append(
+                    {
+                        "provider": fetcher.name,
+                        "result": "empty",
+                        "duration_ms": duration_ms,
+                        "error": last_error,
+                    }
+                )
+            except Exception as e:
+                error_type, error_reason = summarize_exception(e)
+                last_error = f"{fetcher.name} ({error_type}) {error_reason}"
+                duration_ms = int((time.time() - start) * 1000)
+                source_chain.append(
+                    {
+                        "provider": fetcher.name,
+                        "result": "failed",
+                        "duration_ms": duration_ms,
+                        "error": error_reason,
+                    }
+                )
+                logger.warning(f"[{fetcher.name}] 获取全量板块列表失败: {error_reason}")
+
+        return [], source_chain, last_error
+
+    def get_all_sector_names(self) -> List[str]:
+        """Return all sector names by trying providers in priority order."""
+        names, _, last_error = self._get_all_sector_names_with_meta()
+        if names:
+            return names
+        logger.warning(f"[全量板块] 所有数据源均失败，最终错误: {last_error}")
+        return []

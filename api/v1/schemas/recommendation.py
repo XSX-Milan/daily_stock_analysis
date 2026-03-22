@@ -171,6 +171,13 @@ class HotSectorItemResponse(BaseModel):
     source: str | None = Field(None, description="Source provider identifier")
     change_pct: float | None = Field(None, description="Sector change percentage")
     stock_count: int | None = Field(None, description="Stock count in sector")
+    is_hot: bool = Field(
+        False, description="Whether this sector belongs to hot ranking"
+    )
+    hot_rank: int | None = Field(
+        None,
+        description="Hot-sector rank; smaller number means hotter",
+    )
     snapshot_at: datetime | None = Field(
         None, description="Snapshot freshness timestamp"
     )

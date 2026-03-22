@@ -15,6 +15,8 @@ FastAPI 应用工厂模块
     app = create_app()
 """
 
+import asyncio
+import logging
 import mimetypes
 import os
 from contextlib import asynccontextmanager
@@ -34,13 +36,50 @@ from api.v1.schemas.common import HealthResponse
 from src.services.system_config_service import SystemConfigService
 
 
+logger = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
     app.state.system_config_service = SystemConfigService()
+    preload_task: asyncio.Task[None] | None = None
+
+    async def _preload_hot_sector_snapshots() -> None:
+        try:
+            from src.services.recommendation_service import RecommendationService
+            service = RecommendationService()
+        except Exception as exc:
+            logger.warning("Failed to initialize recommendation preload service: %s", exc)
+            return
+
+        for market in ("CN", "HK", "US"):
+            try:
+                sectors = await asyncio.to_thread(service.get_hot_sectors, market)
+                logger.info(
+                    "Preloaded hot-sector snapshot market=%s count=%s",
+                    market,
+                    len(sectors),
+                )
+            except Exception as exc:
+                logger.warning("Failed to preload hot-sector snapshot market=%s: %s", market, exc)
+
+    preload_task = asyncio.create_task(_preload_hot_sector_snapshots())
+    app.state.recommendation_hot_sector_preload_task = preload_task
+
     try:
         yield
     finally:
+        if preload_task is not None and not preload_task.done():
+            preload_task.cancel()
+            try:
+                await preload_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("Hot-sector preload task shutdown failed: %s", exc)
+        if hasattr(app.state, "recommendation_hot_sector_preload_task"):
+            delattr(app.state, "recommendation_hot_sector_preload_task")
         if hasattr(app.state, "system_config_service"):
             delattr(app.state, "system_config_service")
 
@@ -122,7 +161,7 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
     
     if has_frontend:
         @app.get("/", include_in_schema=False)
-        async def root():
+        async def root_frontend():
             """根路由 - 返回前端页面"""
             return FileResponse(static_dir / "index.html")
     else:
@@ -154,7 +193,7 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
 </div></body></html>"""
 
         @app.get("/", include_in_schema=False)
-        async def root():
+        async def root_fallback():
             """根路由 - 前端未构建时返回引导页面"""
             return HTMLResponse(content=_FRONTEND_NOT_BUILT_HTML)
     

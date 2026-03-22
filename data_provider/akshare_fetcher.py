@@ -1769,6 +1769,47 @@ class AkshareFetcher(BaseFetcher):
             logger.error(f"[Akshare] 新浪接口获取板块排行也失败: {e}")
             return None
 
+    def get_all_sector_names(self) -> list[str]:
+        """Return a deduplicated full A-share sector name list with fallback."""
+        import akshare as ak
+
+        def _extract_sector_names(df: pd.DataFrame, name_col: str) -> list[str]:
+            """Extract ordered unique sector names from a DataFrame column."""
+            if df is None or df.empty or name_col not in df.columns:
+                return []
+            names: list[str] = []
+            for raw_name in df[name_col].tolist():
+                name = str(raw_name or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            return names
+
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            logger.info("[API调用] ak.stock_board_industry_name_em() 获取A股全量板块...")
+            df = ak.stock_board_industry_name_em()
+            names = _extract_sector_names(df, "板块名称")
+            if names:
+                return names
+        except Exception as e:
+            logger.warning(f"[Akshare] 东财接口获取A股全量板块失败: {e}，尝试新浪接口")
+
+        try:
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            logger.info("[API调用] ak.stock_sector_spot() 获取A股全量板块(新浪)...")
+            df = ak.stock_sector_spot(indicator="行业")
+            names = _extract_sector_names(df, "板块")
+            if names:
+                return names
+        except Exception as e:
+            logger.error(f"[Akshare] 新浪接口获取A股全量板块也失败: {e}")
+
+        return []
+
 
 if __name__ == "__main__":
     # 测试代码

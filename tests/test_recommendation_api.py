@@ -587,6 +587,10 @@ class FakeRecommendationService:
 
         if target_market in {"HK", "US"}:
             fallback = _OVERSEAS_SECTOR_FALLBACK.get(target_market, {})
+            rank_map = {
+                self._normalize_sector_key(name): rank
+                for rank, name in enumerate(fallback.keys(), start=1)
+            }
             return [
                 {
                     "name": name,
@@ -597,6 +601,8 @@ class FakeRecommendationService:
                     "source": "overseas_fallback",
                     "change_pct": None,
                     "stock_count": len(codes),
+                    "is_hot": True,
+                    "hot_rank": rank_map.get(self._normalize_sector_key(name)),
                     "snapshot_at": snapshot_at,
                     "fetched_at": fetched_at,
                 }
@@ -637,11 +643,16 @@ class FakeRecommendationService:
             pass
 
         sectors: list[dict[str, object]] = []
+        hot_rank_map = {
+            self._normalize_sector_name(name): rank
+            for rank, name in enumerate(ranking_sector_names, start=1)
+        }
         if scanned:
             for sector_name, stock_codes in scanned[:3]:
                 name = str(sector_name or "").strip()
                 if not name:
                     continue
+                normalized_name = self._normalize_sector_name(name)
                 stock_count = (
                     len(stock_codes) if isinstance(stock_codes, list) else None
                 )
@@ -653,16 +664,17 @@ class FakeRecommendationService:
                         "aliases": [name, self._normalize_sector_key(name)],
                         "raw_name": name,
                         "stock_count": stock_count,
-                        "change_pct": change_pct_by_sector.get(
-                            self._normalize_sector_name(name)
-                        ),
+                        "change_pct": change_pct_by_sector.get(normalized_name),
                         "source": "sector_scan",
+                        "is_hot": normalized_name in hot_rank_map,
+                        "hot_rank": hot_rank_map.get(normalized_name),
                         "snapshot_at": snapshot_at,
                         "fetched_at": fetched_at,
                     }
                 )
         else:
             for name in ranking_sector_names[:3]:
+                normalized_name = self._normalize_sector_name(name)
                 sectors.append(
                     {
                         "name": name,
@@ -671,10 +683,10 @@ class FakeRecommendationService:
                         "aliases": [name, self._normalize_sector_key(name)],
                         "raw_name": name,
                         "stock_count": None,
-                        "change_pct": change_pct_by_sector.get(
-                            self._normalize_sector_name(name)
-                        ),
+                        "change_pct": change_pct_by_sector.get(normalized_name),
                         "source": "sector_rankings",
+                        "is_hot": normalized_name in hot_rank_map,
+                        "hot_rank": hot_rank_map.get(normalized_name),
                         "snapshot_at": snapshot_at,
                         "fetched_at": fetched_at,
                     }
@@ -1308,6 +1320,8 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertEqual(sectors[0]["display_label"], "半导体")
         self.assertEqual(sectors[0]["raw_name"], "半导体")
         self.assertEqual(sectors[0]["source"], "sector_scan")
+        self.assertTrue(all(item["is_hot"] for item in sectors))
+        self.assertEqual([item["hot_rank"] for item in sectors], [1, 2, 3])
         self.assertIn("半导体", sectors[0]["aliases"])
         self.assertIsNotNone(sectors[0]["snapshot_at"])
         self.assertIsNotNone(sectors[0]["fetched_at"])
@@ -1334,6 +1348,11 @@ class RecommendationApiTestCase(unittest.TestCase):
             self.assertTrue(all(item["canonical_key"] for item in sectors))
             self.assertTrue(all(item["display_label"] for item in sectors))
             self.assertTrue(all(item["raw_name"] for item in sectors))
+            self.assertTrue(all(item["is_hot"] for item in sectors))
+            self.assertEqual(
+                [item["hot_rank"] for item in sectors],
+                list(range(1, len(sectors) + 1)),
+            )
             self.assertTrue(
                 all(item["source"] == "overseas_fallback" for item in sectors)
             )
@@ -1352,6 +1371,8 @@ class RecommendationApiTestCase(unittest.TestCase):
         self.assertEqual(
             [item["name"] for item in sectors], ["半导体", "人工智能", "证券"]
         )
+        self.assertTrue(all(item["is_hot"] for item in sectors))
+        self.assertEqual([item["hot_rank"] for item in sectors], [1, 2, 3])
         self.assertTrue(all(item["stock_count"] is None for item in sectors))
         self.assertEqual(self.fake_service.hot_sector_call_count, 1)
 
@@ -1370,6 +1391,8 @@ class RecommendationApiTestCase(unittest.TestCase):
         sectors = fetcher_failed.json()["sectors"]
         self.assertEqual([item["name"] for item in sectors], ["半导体", "人工智能"])
         self.assertEqual([item["stock_count"] for item in sectors], [3, 2])
+        self.assertTrue(all(item["is_hot"] is False for item in sectors))
+        self.assertTrue(all(item["hot_rank"] is None for item in sectors))
         self.assertTrue(all(item["change_pct"] is None for item in sectors))
         self.assertEqual(self.fake_service.hot_sector_call_count, 1)
 

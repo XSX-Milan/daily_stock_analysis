@@ -136,6 +136,8 @@ export interface RecommendationHotSector {
   source?: string | null;
   changePct?: number | null;
   stockCount?: number | null;
+  isHot?: boolean;
+  hotRank?: number | null;
   snapshotAt?: string | null;
   fetchedAt?: string | null;
 }

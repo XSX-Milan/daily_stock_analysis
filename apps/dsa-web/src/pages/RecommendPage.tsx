@@ -209,7 +209,7 @@ const RecommendPage: React.FC = () => {
     });
   };
 
-  const selectedMarket = normalizeMarket(filters.market ?? filters.region);
+  const selectedMarket = normalizeMarket(filters.market ?? filters.region) || MarketRegion.CN;
   const selectedPriority = String(filters.priority ?? '');
 
   const fallbackHotSectorMarket = useMemo(() => {
@@ -340,17 +340,8 @@ const RecommendPage: React.FC = () => {
     [hasSelectedSectors, recommendationPool, selectedSectorTokens],
   );
 
-  const hasActiveHotSectorData = activeHotSectors.length > 0;
-  const hasMarketScopedHotSectorRecord = useMemo(
-    () => Object.prototype.hasOwnProperty.call(hotSectorsByMarket, fallbackHotSectorMarket),
-    [fallbackHotSectorMarket, hotSectorsByMarket],
-  );
-
   useEffect(() => {
     if (loading || viewMode !== 'live') {
-      return;
-    }
-    if (hasActiveHotSectorData || hasMarketScopedHotSectorRecord) {
       return;
     }
     if (inFlightHotSectorFetchByMarketRef.current.has(fallbackHotSectorMarket)) {
@@ -369,8 +360,6 @@ const RecommendPage: React.FC = () => {
   }, [
     fallbackHotSectorMarket,
     fetchHotSectors,
-    hasActiveHotSectorData,
-    hasMarketScopedHotSectorRecord,
     loading,
     viewMode,
   ]);
@@ -545,6 +534,8 @@ const RecommendPage: React.FC = () => {
               onSectorToggle={handleSectorToggle}
               onClearAll={handleClearAllSectors}
               hotSectors={activeHotSectors}
+              enablePagination={activeSectorMarket === MarketRegion.CN}
+              pageSize={24}
             />
 
             {!hasSelectedSectors && smartRecommendAttempted && (

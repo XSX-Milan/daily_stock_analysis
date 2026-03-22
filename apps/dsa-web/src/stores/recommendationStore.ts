@@ -69,7 +69,9 @@ interface RecommendationStorePersistedSlice {
   hotSectorCacheMetaByMarket: Record<string, RecommendationHotSectorCacheMeta>;
 }
 
-const DEFAULT_FILTERS: RecommendationStoreFilters = {};
+const DEFAULT_FILTERS: RecommendationStoreFilters = {
+  market: 'CN',
+};
 const RECOMMENDATION_STORE_PERSIST_KEY = 'dsa-web-recommendation-store';
 
 const createNoopStorage = (): StateStorage => ({
@@ -626,14 +628,12 @@ export const useRecommendationStore = create<RecommendationState & Recommendatio
           selectedSectorsByMarket: withSelectedSectorsForMarket(state.selectedSectorsByMarket, market, normalizedSectors),
         }));
         try {
-          const {
-            sector: _ignoredSector,
-            sectors: _ignoredSectors,
-            ...restRequest
-          } = request;
           const refreshRequest: RecommendationRefreshRequest = {
-            ...restRequest,
             market,
+            region: request.region,
+            force: request.force,
+            forceRefresh: request.forceRefresh,
+            stockCodes: request.stockCodes,
           };
           if (hasSectors) {
             refreshRequest.sector = normalizedSectors[0];

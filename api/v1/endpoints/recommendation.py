@@ -726,6 +726,8 @@ def get_hot_sectors(
                 source=str(item.get("source") or "").strip() or None,
                 change_pct=item.get("change_pct"),
                 stock_count=item.get("stock_count"),
+                is_hot=bool(item.get("is_hot", False)),
+                hot_rank=item.get("hot_rank"),
                 snapshot_at=item.get("snapshot_at"),
                 fetched_at=item.get("fetched_at"),
             )

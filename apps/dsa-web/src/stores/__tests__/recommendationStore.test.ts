@@ -40,7 +40,7 @@ const resetStore = () => {
     summary: null,
     loading: false,
     error: null,
-    filters: {},
+    filters: { market: 'CN' },
     detailOpen: false,
     detailLoading: false,
     detailError: null,
@@ -72,6 +72,19 @@ describe('recommendationStore', () => {
     await useRecommendationStore.persist.clearStorage();
     localStorage.removeItem(RECOMMENDATION_STORE_PERSIST_KEY);
     resetStore();
+  });
+
+  it('resets filters to CN market by default', () => {
+    useRecommendationStore.setState({
+      filters: {
+        market: 'US',
+        priority: 'BUY_NOW',
+      },
+    });
+
+    useRecommendationStore.getState().clearFilters();
+
+    expect(useRecommendationStore.getState().filters).toEqual({ market: 'CN' });
   });
 
   it('opens history detail via recommendation-owned detail lookup', async () => {

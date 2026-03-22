@@ -7,7 +7,13 @@ const navigateMock = vi.fn();
 const mockStoreState = vi.hoisted(() => ({
   recommendations: [] as Array<Record<string, unknown>>,
   summary: null,
-  filters: {},
+  filters: { market: 'CN' } as {
+    market?: string;
+    region?: string;
+    priority?: string;
+    sector?: string;
+    sectors?: string[];
+  },
   loading: false,
   error: null,
   hotSectors: [] as Array<Record<string, unknown>>,
@@ -95,7 +101,7 @@ describe('RecommendPage', () => {
     Object.assign(mockStoreState, {
       recommendations: [],
       summary: null,
-      filters: {},
+      filters: { market: 'CN' },
       loading: false,
       error: null,
       hotSectors: [],
@@ -161,6 +167,7 @@ describe('RecommendPage', () => {
   });
 
   it('opens live recommendation detail through recommendationStore action', async () => {
+    mockStoreState.filters = { market: 'US' };
     mockStoreState.recommendations = [
       {
         stockCode: 'AAPL',
@@ -336,7 +343,7 @@ describe('RecommendPage', () => {
     expect(mockStoreState.fetchHotSectors).toHaveBeenCalledTimes(2);
   });
 
-  it('does not auto-refetch when empty result has already been cached for market', async () => {
+  it('auto-refetches once when cached market result is empty', async () => {
     mockStoreState.filters = { market: 'CN' };
     mockStoreState.recommendations = [];
     mockStoreState.hotSectors = [];
@@ -353,8 +360,8 @@ describe('RecommendPage', () => {
 
     await waitFor(() => {
       expect(mockStoreState.fetchRecommendations).toHaveBeenCalledTimes(1);
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('CN');
     });
-    expect(mockStoreState.fetchHotSectors).not.toHaveBeenCalled();
   });
 
   it('does not loop auto-fetch after one failed market fetch attempt', async () => {
@@ -419,7 +426,39 @@ describe('RecommendPage', () => {
     expect(await screen.findByTestId('sector-tag-逆变器')).toBeInTheDocument();
     expect(screen.getByTestId('sector-tag-算力')).toBeInTheDocument();
     expect(screen.getByText('2 个板块')).toBeInTheDocument();
-    expect(mockStoreState.fetchHotSectors).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mockStoreState.fetchHotSectors).toHaveBeenCalledWith('CN');
+    });
+  });
+
+  it('paginates CN sector chips when hot-sector list is large', async () => {
+    mockStoreState.filters = { market: 'CN' };
+    mockStoreState.recommendations = [];
+    const sectors = Array.from({ length: 30 }, (_, index) => {
+      const rank = index + 1;
+      return {
+        name: `板块${String(rank).padStart(2, '0')}`,
+        isHot: rank <= 3,
+        hotRank: rank <= 3 ? rank : null,
+      };
+    });
+
+    mockStoreState.hotSectors = sectors;
+    mockStoreState.hotSectorsMarket = 'CN';
+    mockStoreState.hotSectorsByMarket = {
+      CN: sectors,
+    };
+
+    render(
+      <MemoryRouter>
+        <RecommendPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('sector-tag-板块01')).toBeInTheDocument();
+    expect(screen.queryByTestId('sector-tag-板块30')).not.toBeInTheDocument();
+    expect(screen.getByTestId('sector-filters-pagination')).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-testid^="sector-tag-"]').length).toBe(25);
   });
 
   it('restores selected sectors from market-scoped store state and keeps hidden chips visible', async () => {
